@@ -1,0 +1,1642 @@
+---
+title: "Thesis Notes"
+author: "Ezra Weible"
+date: "`r Sys.Date()`"
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+In this document, I would like to revise my work from Compiled_Notes to be more reproducible and better coded/commented for future reference. The first change I made was shifting which clustering strategy I used from spectral to flag mean. 
+
+# Methods Steps:
+## Data Cleaning: - review with more detail
+### MB: 
+  - filter to time 1
+  - keep microbes with at least 0.1% abundance in at least 1 child
+  - keep microbes that are present in at least 10% of kids (3 children)
+### PT:
+  - filter to time 1
+  - log 2 transformation
+- remove outlier sid 49
+- filter to sids that are present in both mb and pt
+
+## Data analysis
+- create Eigenvalues of graph Laplacian and Heatmap of Adjacency Matrix for pt and mb
+  - calculate eigenvalues and vectors from these
+  - choose number of individual clusters
+  - cluster mb with euclidian distance and GMM (b/c messier than kmeans)
+  - cluster pt with kmeans 
+  - rank k approximations and average to get overall lapsig apx 
+  - spectral clustering (decide on number of clusters from traceW)
+  or flag mean:
+  - extract spectral embeddings 
+  - compute the flag mean (mean subspace combining both datasets = flm.vecs)
+  - Use 4 clusters estimated from average Laplacian NbClust (TraveW)
+  - cluster the flag-mean subspace (SVD of concatenated subspaces produces a basis ordered by singular values, the first Fk columns capture the most important shared structure)
+  - 3D projection of flag-mean embedding (colored by cluster)
+    Rewritten:
+      - Compute Laplacians to represent each dataset as a graph
+      - Compute eigenvectors to extract spectral embeddings
+      - Extract subspaces to keep only cluster-informative eigenvectors
+      - Compute flag mean to average the subspaces geometrically
+      - choose number of clusters from traceW to estimate the joint cluster count
+      - Cluster the flag mean subspace to produce joint clusters
+
+- then did univariate anovas to compare clinical data across the groups with FDR corrections
+- post-hoc adjustments to figure out specific group differences
+  - check for missing data among future differences by group to see if the significance changes when the NA values are removed with FDR correction (used disher to see if the amount of missing is significantly different by group)
+  - Use Levenes test to see if the variances are equal and Tukey HSD is appropriate post-hoc
+  - Perform TUkey HSD
+  
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+`%nin%` <- Negate(`%in%`)
+library(tidyverse); library(magrittr); library(plotly)
+library(compositions); library(VIM)
+library(MAI); library(ClusterR); library(RVA)
+library(ggrepel); library(NbClust)
+library(alluvial); library(ggalluvial)
+```
+
+# Simulation Functions
+Code from SimulationFunctions.R, which is required for all of Charlie's code. Commented out code was removed. The LadleEstimator.R source file was not found and was thus removed. 
+```{r}
+# Helpful functions -----------------------------------------------------------------
+`%nin%` <- Negate(`%in%`)
+
+pkgs <- c("tidyverse", "magrittr", "igraph", "matrixcalc",
+          "MASS", "diffusr", "Matrix", "cluster", 'mclust',
+          'Spectrum', 'NbClust')
+
+suppressMessages(lapply(pkgs, library, character.only = T))
+
+# Kernels --------------------------------------------------------
+
+Gaussian_kernel <- function(Z, rho){
+  exp(-(1/rho)*as.matrix(dist(Z, method = "euclidean", upper = T)^2))
+}
+
+Zhang_kernel <- function(Z, p){
+  d <- as.matrix( dist(Z) )
+  
+  si <- apply(d, 2, function(s) sort(s)[p+1] )
+  db <- si %o% si
+  dt <- -d^2/db
+  
+  exp(dt)
+}
+
+knnGrf <- function(A, k, mutual=FALSE){
+  knn <- function(aa, k){
+    aa[order(aa)[(k+2):length(aa)]] <- 0
+    aa[aa > 0] <- 1
+    aa
+  }
+  
+  akn <- apply(A,2,knn,k=k)
+  
+  if(mutual){
+    for(i in 1:nrow(akn)){
+      for(j in 1:ncol(akn)){
+        akn[i,j] <- ifelse(akn[i,j]==akn[j,i], 
+                           akn[i,j],
+                           0)
+      }
+    }
+  } else{
+    for(i in 1:nrow(akn)){
+      for(j in 1:ncol(akn)){
+        akn[i,j] <- ifelse(akn[i,j]!=akn[j,i], 
+                           max(akn[i,j],akn[j,i]),
+                           akn[i,j])
+      }
+    }
+  }
+  akn
+}
+
+## Laplacian ## USED FOR HEATMAPS
+gaussLaplac <- function(dat, rho=NULL, kernel='Gaussian',
+                        lap.type = 'sym',
+                        grf.type = 'full', k=5, p=5,
+                        epsilon=0, mutual=FALSE, 
+                        binary.grf=FALSE,
+                        plots=TRUE, verbose=TRUE){
+  
+  if(is.null(rho)) rho <- median(dist(dat))
+  if(kernel == 'Gaussian') A <- Gaussian_kernel(dat, rho = rho)
+  
+  if(kernel == 'Zhang') A <- Zhang_kernel(dat, p)
+  if(kernel == 'Spectrum'){
+    dtd <- as.data.frame( t(dat) )
+    A <- Spectrum::CNN_kernel(dtd)
+  }
+  
+  if(kernel == 'Linear') A <- dat%*%t(dat)
+  if(kernel == 'Cor') A <- cor(t(dat))
+  
+  diag(A) <- 0 ## Adjacency matrices need diag of 0
+  
+  if(verbose){
+    message(paste('Distances calculated with', kernel, 'kernel.'))
+    message("Summary of parwise distances:")
+    print(summary(A[lower.tri(A)]))
+  }
+  
+  if(grf.type == 'e-graph'){
+    A[A < epsilon] <- 0
+  }
+  
+  if(grf.type == 'knn'){
+    A <- knnGrf(A, k, mutual=mutual)
+  }
+  
+  if(binary.grf) A[A >0] <- 1
+  
+  deg <- rowSums(A)
+
+  if(lap.type == 'sym'){
+    ds <- ifelse(deg>0, 1/sqrt(deg), 0)
+    # L = I - D^(-1/2) A D^(-1/2)
+    L <- diag(nrow = nrow(A)) - diag(ds) %*% A %*% diag(ds)
+  }
+  
+  ## 'Shifted' Laplacian
+  if(lap.type == "shift"){
+    ds <- ifelse(deg>0, 1/sqrt(deg), 0)
+    # L = I + D^(-1/2) A D^(-1/2)
+    L <- diag(nrow = nrow(A)) + diag(ds) %*% A %*% diag(ds)
+  }
+  
+  ## Laplacian used by Ng (2002) 'On Spectral Clustering'
+  if(lap.type == "Ng"){
+    ds <- ifelse(deg>0, 1/sqrt(deg), 0)
+    # L = D^(-1/2) A D^(-1/2)
+    L <- diag(ds) %*% A %*% diag(ds)
+  }
+  
+  ## Random walk Laplacian (best one)
+  if(lap.type == 'rw'){
+    ds <- ifelse(deg>0, 1/deg, 0)
+    # L = I - D^-1 A
+    L <- diag(nrow = nrow(A)) - diag(ds) %*% A
+  } 
+  
+  if(plots){
+    gg <- igraph::graph_from_adjacency_matrix(A,
+                                              mode='undirected',
+                                              weighted = TRUE)
+    # plot(gg, layout=igraph::layout_with_kk,
+    #      vertex.color='darkorchid1',
+    #      vertex.label=NA)
+    
+    stats::heatmap(A, symm=TRUE, 
+                   main = "Heatmap of Adjacency Matrix")
+    
+    plot(eigen(L)$values, col='dodgerblue3', pch=20, type="b",
+         ylab="Eigen values", main = "Eigen values of the Laplacian")
+  }
+  
+  L
+}
+
+# Matrix Functions --------------------------------------------------------
+
+## Trace of a matrix
+tr <- function(x){
+  if(!is.matrix(x)) stop("x must be a matrix")
+  sum(diag(x))
+}
+
+## Check if matrix is orthogonal
+orthoCheck <- function(x){
+  xtx <- crossprod(x)
+  I <- diag(nrow = nrow(xtx))
+  
+  # Same tolerance as 'isSymmetric'
+  sum((I-xtx)^2) < 100*.Machine$double.eps
+}
+
+## Row normalize a matrix (rows have length 1)
+rowNrm <- function(x){
+  nrm <- apply(x, 1, function(xi) sqrt(sum(xi^2)))
+  sweep(x, 1, nrm, "/")
+}
+
+# Flag Mean ---------------------------------------------------------------
+
+## Calculate flag mean subspace
+## Marrinan, et al. "Finding the Subspace Mean or Median to Fit Your Need"
+flagMean <- function(Ul, plots=TRUE){
+  
+  ## Check orthogonal
+  # if(!all(sapply(Ul, orthoCheck))) stop("All matrices must have orthogonal columns")
+  
+  r <- max(vapply(Ul, ncol, 0))
+  
+  ## Concatenating matrices
+  X <- do.call(cbind, Ul)
+  svdX <- svd(X)
+  
+  if(plots) plot(svdX$d, col='dodgerblue3', pch=20, type="b",
+                 ylab="Singular Values", main="Singular values of the flag mean")
+  
+  svdX
+}
+
+flagMeanClust <- function(Llist, kList, ngrp, lap.type='rw'){
+  subSpaceL <- mapply(subSpace, Llist, kList,
+                      lap.type=lap.type, SIMPLIFY=FALSE)
+  fm <- flagMean(subSpaceL, plots = FALSE)$u
+  
+  km <- kmeans(fm[,1:ngrp], centers=ngrp, nstart=10)
+  list(eLR=fm[,1:ngrp], km=km)
+}
+
+subSpace <- function(L,k, lap.type='rw'){
+  eig <- eigen(L)
+  
+  vec <- eig$vector 
+  if(lap.type %in% c('rw','sym')) ind <- (ncol(vec)-k+1):ncol(vec)
+  else ind <- 1:k
+  vec[,ind,drop=F]
+}
+
+## Flag mean ignoring constant vector. Changes the 'ind'
+flagMeanNoConstant <- function(Llist, kList, ngrp){
+  subSpace <- function(L,k){
+    eig <- eigen(L)
+    
+    vec <- eig$vector 
+    ind <- (ncol(vec)-k+1):(ncol(vec)-1)
+    vec[,ind, drop=FALSE]
+  }
+  
+  subSpaceL <- mapply(subSpace, Llist, kList)
+  fm <- flagMean(subSpaceL, plots = FALSE)$u
+  
+  km <- kmeans(fm[,1:(ngrp-1)], centers=ngrp, nstart=10)
+  list(eLR=fm[,1:(ngrp-1)], km=km)
+}
+
+# L_approx ----------------------------------------------------------------
+
+## Function to extract k primary eigen vectors and values
+## and reconstruct Laplacians from that
+LapSig <- function(Ls, ks, lap.type='rw', normalize=FALSE){
+  
+  eig <- eigen(Ls)
+  
+  if(lap.type %in% c('rw', 'sym')){
+    ind <- (ncol(Ls)-ks+1):ncol(Ls)
+  } else ind <- seq(1,ks)
+  
+  vecs <- eig$vectors[,ind]
+  vals <- eig$values[ind]
+  
+  if(normalize) vecs <- rowNrm(vecs)
+  
+  vecs %*% diag(vals) %*% t(vecs)
+}
+
+## Better way to do that but keeping the above one for old code
+Lapprox <- function(L, k, lap.type='rw'){
+  eig <- eigen(L)
+  
+  vec <- eig$vector
+  if(lap.type %in% c('rw','sym')) ind <- (ncol(vec)-k+1):ncol(vec)
+  else ind <- 1:k
+  
+  ev <- vec[,ind,drop=F]; val <- eig$values[ind]
+  
+  sweep(ev, 2, val, "*")%*%t(ev)
+}
+
+LapproxClust <- function(Llist, Klist, ngrp, lap.type='rw'){
+  # ngrp <- max(Klist)
+  approxList <- mapply(Lapprox, Llist, Klist, 
+                       lap.type=lap.type, SIMPLIFY=FALSE)
+  approxList <- lapply(approxList, function(aL) aL/length(approxList))
+  
+  LR <- Reduce("+", approxList)
+  eLR <- eigen(LR)$vectors
+  km <- kmeans(eLR[,1:ngrp], centers=ngrp, nstart=10)
+  
+  list(eLR=eLR[,1:ngrp], km=km)
+}
+
+
+# ClusterEval -------------------------------------------------------------
+
+silhouette_score <- function(vecs, k, nstart=10){
+  km <- kmeans(vecs, centers = k, nstart=nstart)
+  
+  ss <- silhouette(km$cluster, dist(vecs))
+  mean(ss[, 3])
+}
+
+## F-score / F-measure / F1
+f_measure <- function(ll, grps, k, type = 'simple'){
+  
+  if(type == 'simple') ev <- eigen(ll)$vectors[,1:k]
+  else if(type == 'flag') ev <- ll$u[,1:k]
+  else stop("'type' should be 'simple' or 'flag' ")
+  
+  km <- kmeans(ev, centers = k, nstart = k)
+  
+  cb <- cbind(km$cluster, grps)
+  tt <- table(cb[,1], cb[,2])
+  
+  ## Randomly distributing wrong groupings
+  ## to other incorrect places for square matrix
+  while(nrow(tt) != ncol(tt)){
+    tm <- which.min(colSums(tt))
+    miss <- colSums(tt)[tm]
+    
+    tt <- tt[, -tm]
+    zs <- which(tt==0)
+    
+    for(mm in 1:miss){ 
+      ss <- sample(zs, 1)
+      tt[ss] <- tt[ss] + 1
+    }
+  }
+  
+  ## Reordering so highest agreement is on diagonal
+  ord <- order(apply(tt, 2, which.max))
+  tt <- tt[, ord]
+  colnames(tt) <- 1:ncol(tt)
+  rownames(tt) <- 1:nrow(tt)
+  
+  ## In case of imperfect groupings
+  # F1 score / F-measure
+  f1 <- confusionMatrix(tt, mode = 'prec_recall')$byClass[,"F1"]
+  f1[is.nan(f1)] <- 0
+  mean(f1)
+}
+
+fMeas <- function(ll, grps, k, type='simple'){
+  tt <- table(ll$km$cluster, grps)
+  
+  ## Making confusion matrix square
+  while(nrow(tt) != ncol(tt)){
+    if(nrow(tt) > ncol(tt)){
+      tt <- cbind(tt, rep(0, nrow(tt)))
+    }
+    if(ncol(tt) > nrow(tt)){
+      tt <- rbind(tt, rep(0, ncol(tt)))
+    }
+  }
+  
+  ## Reordering so highest agreement is on diagonal
+  ord <- order(apply(tt, 2, which.max))
+  tt <- tt[, ord]
+  colnames(tt) <- 1:ncol(tt)
+  rownames(tt) <- 1:nrow(tt)
+  ## In case of imperfect groupings
+  # F1 score / F-measure
+  f1 <- confusionMatrix(tt, mode = 'prec_recall')$byClass
+  if(is.matrix(f1)) f1 <- f1[,"F1"]
+  else f1 <- f1["F1"]
+  
+  f1[is.nan(f1)] <- 0
+  f1[is.na(f1)] <- 0
+  mean(f1)
+}
+
+# Combo Flag Lapprox ------------------------------------------------------
+
+comboU <- function(L,k){
+  vec <- eigen(L)$vector 
+  ind <- (ncol(vec)-k+1):ncol(vec)
+  U <- vec[,ind]
+  
+  tcrossprod(U)
+}
+
+flagLapproxCombo <- function(Llist, Klist, ngrp){
+  # ngrp <- max(Klist)
+  approxList <- mapply(Lapprox, Llist, Klist, SIMPLIFY=FALSE)
+  approxList <- lapply(approxList, function(aL) aL/length(approxList))
+  
+  UL <- mapply(comboU, Llist, Klist, SIMPLIFY=FALSE)
+  
+  LR <- Reduce("+", approxList)
+  Uks <- Reduce("+", UL)
+  
+  eig <- eigen(LR+Uks)$vectors[,1:ngrp]
+  km <- kmeans(eig, centers=ngrp, nstart=10)
+  
+  list(eLR=eig, km=km)
+}
+
+# SPECTRUM functions ------------------------------------------------------
+
+specSil <- function(sp){
+  vecs <- sp$eigensystem$vectors[,1:sp$K]
+  ss <- silhouette(sp$assignments, dist(vecs))
+  mean(ss[, 3])
+}
+
+specARI <- function(sp, grps){
+  adjustedRandIndex(sp$assignments, grps)
+}
+
+specFMeas <- function(sp, grps, k){
+  tt <- table(sp$assignments, grps)
+  
+  ## Making confusion matrix square
+  while(nrow(tt) != ncol(tt)){
+    if(nrow(tt) > ncol(tt)){
+      tt <- cbind(tt, rep(0, nrow(tt)))
+    }
+    if(ncol(tt) > nrow(tt)){
+      tt <- rbind(tt, rep(0, ncol(tt)))
+    }
+  }
+  
+  ## Reordering so highest agreement is on diagonal
+  ord <- order(apply(tt, 2, which.max))
+  tt <- tt[, ord]
+  colnames(tt) <- 1:ncol(tt)
+  rownames(tt) <- 1:nrow(tt)
+  ## In case of imperfect groupings
+  # F1 score / F-measure
+  f1 <- confusionMatrix(tt, mode = 'prec_recall')$byClass
+  if(is.matrix(f1)) f1 <- f1[,"F1"]
+  else f1 <- f1["F1"]
+  
+  f1[is.nan(f1)] <- 0
+  f1[is.na(f1)] <- 0
+  mean(f1)
+}
+
+# NEMO Functions ----------------------------------------------------------
+
+nemoClust <- function(dd, nGrp){
+  clust <- nemo.clustering(dd, num.clusters=nGrp)
+  aff <- nemo.affinity.graph(dd)
+  sim <- eigen(aff)$vectors[, 1:nGrp]
+  
+  list(clust=clust, sim=sim)
+}
+
+nemoSil <- function(ne){
+  ss <- silhouette(ne$clust, dist(ne$sim))
+  mean(ss[, 3])
+}
+
+nemoFMeas <- function(ne, grps){
+  tt <- table(ne$clust, grps)
+  
+  ## Making confusion matrix square
+  while(nrow(tt) != ncol(tt)){
+    if(nrow(tt) > ncol(tt)){
+      tt <- cbind(tt, rep(0, nrow(tt)))
+    }
+    if(ncol(tt) > nrow(tt)){
+      tt <- rbind(tt, rep(0, ncol(tt)))
+    }
+  }
+  
+  ## Reordering so highest agreement is on diagonal
+  ord <- order(apply(tt, 2, which.max))
+  tt <- tt[, ord]
+  colnames(tt) <- 1:ncol(tt)
+  rownames(tt) <- 1:nrow(tt)
+  ## In case of imperfect groupings
+  # F1 score / F-measure
+  f1 <- confusionMatrix(tt, mode = 'prec_recall')$byClass
+  if(is.matrix(f1)) f1 <- f1[,"F1"]
+  else f1 <- f1["F1"]
+  
+  f1[is.nan(f1)] <- 0
+  f1[is.na(f1)] <- 0
+  mean(f1)
+}
+
+nemoARI <- function(ne, grps){
+  adjustedRandIndex(ne$clust, grps)
+}
+
+ARI <- function(ll, grps, k, type = 'simple'){
+  
+  if(type == 'simple') ev <- eigen(ll)$vectors[,1:k]
+  else if(type == 'flag') ev <- ll$u[,1:k]
+  else stop("'type' should be 'simple' or 'flag' ")
+  
+  km <- kmeans(ev, centers = k, nstart = k)
+  adjustedRandIndex(km$cluster, grps)
+}
+
+ARI.n <- function(ll, grps){
+  adjustedRandIndex(ll$km$cluster, grps)
+}
+
+# SNF Functions -----------------------------------------------------------
+
+snfClust <- function(dd, nGrp){
+  dL <- lapply(dd, function(d){
+    dis <- SNFtool::dist2(as.matrix(d),
+                          as.matrix(d))^(1/2)
+    SNFtool::affinityMatrix(dis)
+  })
+  
+  W <- SNFtool::SNF(dL)
+  sim <- eigen(W)$vectors[,1:nGrp]
+  clust <- SNFtool::spectralClustering(W, K=nGrp)
+  
+  list(clust=clust, sim=sim)
+}
+
+# Data Generation Functions -----------------------------------------------
+
+
+## Generate data in a circle
+circle.data <- function(n, r){
+  aa <- runif(n=n, max = 2*pi)
+  ss <- diag(c(0.05,0.05))
+  ee <- mvrnorm(n=n, mu=c(0,0), Sigma=ss)
+  
+  cbind(x = r*cos(aa), y = r*sin(aa)) + ee
+}
+
+clustStruct <- function(n, p, k, noiseDat=NULL, randNoise=2){
+  if(any(n%%k!=0)) stop("n must be divisible by k.")
+  
+  mapply(function(kk, pp, rn){
+    
+    if(kk == 1){
+      means <- 0
+    } else means <- c(0, 2^( 1:(kk-1) ) )
+    
+    datL <- lapply(means, function(mm){
+      mvrnorm(n/kk, rep(mm,pp), diag(pp))
+    })
+    
+    dat <- do.call(rbind, datL)
+    
+    if(!is.null(noiseDat)){
+      if(is.character(noiseDat)){
+        S <- rn*diag(pp)
+        noiseDat <- mvrnorm(n=n, mu=rep(0,pp), Sigma=S)
+      } 
+      dat <- dat+noiseDat
+    } 
+    
+    dat
+  }, kk=k, pp=p, rn=randNoise, SIMPLIFY=FALSE)
+  
+}
+
+getGroups <- function(k){
+  ttt <- numeric(0)
+  for(i in 1:length(k)){
+    tk <- n/k[i]
+    ttt <- cbind(ttt, rep(1:k[i], each=tk))
+  }
+  as.data.frame(ttt)
+}
+
+trueGroups <- function(k){
+  grps <- getGroups(k)
+  uGrp <- unique(grps)
+  
+  grpN <- cbind(uGrp, Grps=1:nrow(uGrp))
+  merge(grps, grpN)
+}
+
+
+# Estimating K ------------------------------------------------------------
+
+
+## Looking accross eigen vectors (changing space)
+slopeStat <- function(L, kMax=20, pp=1, nstart=10){
+  vecs <- eigen(L)$vectors
+  
+  Ks <- vapply(2:kMax, function(K){
+    ind <- (ncol(vecs)-K+1):ncol(vecs)
+    silhouette_score(vecs[,ind], k=K, nstart=nstart)
+  }, numeric(1))
+  
+  -diff(Ks)*Ks[-length(Ks)]^pp
+}
+
+slopeStatPlot <- function(Llist, kMax=20, pp=1, nstart=10){
+  
+  slpSts <- lapply(Llist, slopeStat, 
+                   kMax=kMax, pp=pp, nstart=nstart)
+  
+  Ll <- length(Llist)
+  vv <- paste("View", 1:Ll)
+  sm <- lapply(slpSts, function(x) ifelse(x==max(x), T, F))
+  
+  data <- data.frame(y = unlist(slpSts),
+                     x = rep(2:(kMax-1), Ll),
+                     v = rep(vv, each=kMax-2),
+                     sm = unlist(sm))
+  
+  ggplot(data, aes(x=x, y=y)) +
+    geom_segment( aes(x=x, xend=x, y=0, yend=y), color="grey") +
+    geom_point(aes(color=sm), size=1, show.legend = FALSE) +
+    facet_wrap(~v, nrow = Ll, scales = 'free') +
+    theme_minimal() +
+    theme(
+      panel.grid.major.x = element_blank(),
+      panel.border = element_blank(),
+      axis.ticks.x = element_blank()
+    ) + 
+    scale_colour_manual(values = c('dodgerblue3', 'firebrick2')) +
+    xlab("Number of clusters") +
+    ylab("Slope Statistic") +
+    geom_text(data = subset(data, sm), 
+              aes(x=x+0.5,y=y,label=x))
+  
+}
+
+## Clustering space stays the same
+slopeStatistic <- function(x, kMax=20, pp=1, nstart=10){
+  Ks <- vapply(2:kMax, function(K){
+    silhouette_score(x, k=K, nstart=nstart)
+  }, numeric(1))
+  
+  -diff(Ks)*Ks[-length(Ks)]^pp
+}
+
+slopeStatisticPlot <- function(X, kMax=20, pp=1, nstart=10){
+  
+  slpSts <- slopeStatistic(X, kMax=kMax, pp=pp, nstart=nstart)
+  sm <- ifelse(slpSts==max(slpSts), T, F)
+  
+  data <- data.frame(y = slpSts,
+                     x = 2:(kMax-1),
+                     sm = sm)
+  
+  ggplot(data, aes(x=x, y=y)) +
+    geom_segment( aes(x=x, xend=x, y=0, yend=y), color="grey") +
+    geom_point(aes(color=sm), size=1, show.legend = FALSE) +
+    theme_minimal() +
+    theme(
+      panel.grid.major.x = element_blank(),
+      panel.border = element_blank(),
+      axis.ticks.x = element_blank()
+    ) + 
+    scale_colour_manual(values = c('dodgerblue3', 'firebrick2')) +
+    xlab("Number of clusters") +
+    ylab("Slope Statistic") +
+    geom_text(data = subset(data, sm), 
+              aes(x=x+0.5,y=y,label=x))
+  
+}
+
+
+eigenGap <- function(L, lap.type='shift'){
+  ev <- eigen(L)$values
+  ## Suggested k
+  
+  if(lap.type %in% c('sym', 'rw')){
+    eg <- length(ev) - which.min(diff(ev))
+  } else eg <- which.min(diff(ev[-1]))+1
+  
+  eg
+}
+
+svdGap <- function(X){
+  X <- do.call(cbind, X)
+  sv <- svd(X)$d
+  which.min(diff(sv[-1]))+1
+}
+
+modalityK <- function(dat, kernel='Gaussian', lap.type='sym', kMax=20){
+  
+  rho <- median(dist(dat))
+  if(kernel == 'Gaussian') A <- Gaussian_kernel(dat, rho = rho)
+  
+  if(kernel == 'Spectrum'){
+    dtd <- as.data.frame( t(dat) )
+    A <- Spectrum::CNN_kernel(dtd)
+  }
+  
+  diag(A) <- 0 ## Adjacency matrices need diag of 0
+  deg <- rowSums(A)
+  gg <- graph_from_adjacency_matrix(A, mode='undirected', weighted=TRUE)
+  
+  if(lap.type == 'sym'){
+    ds <- ifelse(deg>0, 1/sqrt(deg), 0)
+    # L = I - D^(-1/2) A D^(-1/2)
+    L <- diag(nrow = nrow(A)) - diag(ds) %*% A %*% diag(ds)
+  }
+  
+  ## Random walk Laplacian (best one)
+  if(lap.type == 'rw'){
+    ds <- ifelse(deg>0, 1/deg, 0)
+    # L = I - D^-1 A
+    L <- diag(nrow = nrow(A)) - diag(ds) %*% A
+  } 
+  
+  vecs <- eigen(L)$vectors
+  
+  mod <- vapply(2:kMax, function(K){
+    ind <- (ncol(vecs)-K+1):ncol(vecs)
+    kmem <- kmeans(vecs[,ind], K, nstart=10)$cluster
+    igraph::modularity(gg, kmem)
+  }, numeric(1))
+  
+  which.max(mod)+1
+}
+
+SpectrumK <- function(dd, m=1){
+  dt <- as.data.frame(t(dd))
+  Spectrum(dt, method=m, silent=T, showres=F)$K
+}
+```
+
+# Data
+Cleaned data is produced in the CleanAllTimePoints_Ezra.R file. Due to the difference in the number of usable patients for the microbiome and proteomics data at some timepoints, the data is separated into different csv files for each timepoint and each type of data. A RData filetype with all of the data compiled into one file or one file per timepoint can alternatively be generated. 
+```{r}
+# Raw Data -----------------------------------------------------------------
+microbiome_raw <- read.table(here::here("Data", "RawData_Seq_Micro.txt"), header = T, sep = ',')
+proteomic_raw <- read.table(here::here("Data", "RawData_Soma_Prot.txt"), header = T, sep = ',')
+
+# Cleaned Data --------------------------------------------------------------
+mb_T1 <- read.csv(here::here("Data", "CF_clean_T1_micro.csv"))
+sid_1 <- c(26,27,28,30,33,35,37,38,39,41,42,44,46,48,50,51,52,53,57,59,61,62,63,64,66,67,68,69,70,72,74)
+rownames(mb_T1) <- sid_1
+mb_T1 <- subset(mb_T1, select = -c(X))
+
+mb_T2 <- read.csv(here::here("Data", "CF_clean_T2_micro.csv"))
+mb_T3 <- read.csv(here::here("Data", "CF_clean_T3_micro.csv"))
+
+pt_T1 <- read.csv(here::here("Data", "CF_clean_T1_prot.csv"))
+rownames(pt_T1) <- sid_1
+pt_T1 <- subset(pt_T1, select = -c(X))
+
+pt_T2 <- read.csv(here::here("Data", "CF_clean_T2_prot.csv"))
+pt_T3 <- read.csv(here::here("Data", "CF_clean_T3_prot.csv"))
+```
+
+
+# Recreating Figures for Paper
+The figure notation is based on the notation from Charlie's dissertation and recreated from his R code. 
+
+**Figure VII.22**
+Proteomics Eigenvalues of graph Laplacian and Heatmap of Adjacency Matrix for T1. From CF_explore.R. 
+
+What do lines 82 & 126 from explore actually mean and why would they have this dramatic effect? Is there a line in the middle that could be causing things to change? - These lines are changing from count to relative abundance and should be kept in. 
+```{r}
+prot_LapSft <- gaussLaplac(pt_T1, lap.type = 'shift',
+                        kernel = "Spectrum")
+```
+
+**Figure VII.23**
+Microbiome Eigenvalues of graph Laplacian and Heatmap of Adjacency Matrix
+```{r}
+mb_LapSft <- gaussLaplac(mb_T1, lap.type = 'shift', 
+                         kernel = "Spectrum")
+```
+
+**Figure VII.24**
+Clustering subspace via Laplacian
+```{r}
+mb_eigSft <- eigen(mb_LapSft)
+prot_eigSft <- eigen(prot_LapSft)
+
+# Spectral Clustering -----------------------------------------------------
+
+# * MB --------------------------------------------------------------------
+
+mb_vecs <- mb_eigSft$vectors
+
+mk <- 2
+mbInd <- 1:mk
+mbv <- mb_vecs[,mbInd]
+
+mbGMM <- GMM(mbv, mk, dist_mode = 'eucl_dist', #Probably used this one for mb because it is messier than proteomics. kmeans is more standard (below) and proteomics is cleaner
+             em_iter = 15)
+mbClust <- predict(mbGMM, newdata = mbv)
+
+# * Prots -----------------------------------------------------------------
+
+pk <- 2 #Changed to 2 based off adjusted eigenvalue graph (was 3)
+
+# protInd <- (ncol(prot_eigRw$vectors)-pk+1):ncol(prot_eigRw$vectors)
+protInd <- 1:pk
+pev <- prot_eigSft$vectors[,protInd] 
+
+set.seed(10)
+protClust <- kmeans(pev, pk, nstart=5)$cluster
+
+# Combo -------------------------------------------------------------------
+
+## Rank K approximations
+mb_apx <- LapSig(mb_LapSft, mk, lap.type = "shift")
+prot_apx <- LapSig(prot_LapSft, pk, lap.type = "shift")
+
+apxLSft <- mb_apx/2 + prot_apx/2
+
+# * Spec Clust ------------------------------------------------------------
+
+apx_eigSft <- eigen(apxLSft) ## Get eigenvalues and eigenvectors 
+apxV <- apx_eigSft$vectors[,1:sum(pk,mk)]
+
+#Tracew estimates joint number of clusters in apxK
+  NbClust(apxV, index='alllong', method='kmeans') # I think these still mean that 4 is the best
+  
+  par(mfrow=c(1,1))
+
+apxK <- 4
+
+set.seed(4)
+apxClustSft <- kmeans(apxV[,1:4], apxK, nstart=5)$cluster #Cluster them into 4 groups 
+
+
+#tiff(file="FigVII_24.tiff") #Looks like these functions aren't supported in tiff format. Suggestion is to use PNG and then convert to TIFF using the magick package.
+apxV %>% as.data.frame %>% 
+  mutate(clust = factor(apxClustSft)) %>% 
+  plot_ly(x= ~V1, y= ~V2, z= ~V3, #Eigenvectors/eigenvalues (something) for each person (location for each person in 3d space, there is data for 5d space)
+          color = ~clust, colors = 'Set1') %>% 
+  add_markers()
+#dev.off()
+```
+
+
+**Figure VII.25**
+Clustering subspace via flag mean
+```{r}
+Up <- prot_eigSft$vectors[, protInd]
+Um <- mb_eigSft$vectors[,mbInd]
+
+flm <- flmSym <- flagMean(list(Up, Um), plots = FALSE)
+flm.vecs <- flm$u
+
+NbClust(flm.vecs, method = 'kmeans', index='alllong')
+#par(mfrow=c(1,1))
+
+Fk <- 4
+set.seed(235)
+flgClust <- kmeans(flm.vecs[,1:4], centers = Fk, nstart = 10)$cluster
+
+#table(flgClust)
+#table(flgClust, apxClustSft)
+
+flm.vecs %>% as.data.frame %>% 
+  mutate(clust = factor(flgClust)) %>% 
+  plot_ly(x = ~V2, y = ~V3, z = ~V4, 
+          color = ~clust, colors='Set1') %>%
+  add_markers()
+```
+
+**Figure IX.11**
+Eigenvalues of $L^R$ spectra
+```{r}
+plot(apx_eigSft$values, col='dodgerblue3', pch=20, type='b',
+     main=expression(paste("Eigenvalues of ", "L"^"R")), ylab='Eigenvalues')
+```
+
+
+**Figure IX.15**
+Flag mean singular values
+```{r}
+flm <- flmSym <- flagMean(list(Up, Um))
+```
+
+# Comparing demographics across groups 
+Based on the groups identified in the figure section, the patient demographics will be compared by group using simple statistics such as Chi-squared. 
+
+## Group Info
+
+For initial analysis: 
+Groups: 
+Clusters for group (noX): 4 3 3 4 2 4 4 4 4 2 3 4 2 4 1 1 3 2 3 1 1 2 3 1 1 2 2 2 2 2 1
+Clusters for prot (noX):    2 1 1 1 2 2 1 2 2 2 1 2 2 2 2 1 1 2 1 2 1 2 1 2 2 2 2 2 2 2 2
+Clusters for mb (noX):     2 2 2 2 2 2 2 2 2 2 2 2 1 2 1 1 1 1 2 1 1 1 2 1 1 1 1 1 2 1 1
+SID #s (Time 1): 26,27,28,30,33,35,37,38,39,41,42,44,46,48,50,51,52,53,57,59,61,62,63,64,66,67,68,69,70,72,74
+
+For new analysis (with flag manifold, so want to use this in the long run)
+```{r}
+group_T1_info <- data.frame(matrix(data = NA, nrow = 31, ncol = 4))
+colnames(group_T1_info) <- c("SID", "Group_Clust", "Pt_Clust", "Mb_Clust")
+group_T1_info$SID <- c(26,27,28,30,33,35,37,38,39,41,42,44,46,48,50,51,52,53,57,59,61,62,63,64,66,67,68,69,70,72,74)
+group_T1_info$Group_Clust <- c(3, 2, 2, 3, 1, 3, 3, 3, 3, 1, 2, 3, 1, 3, 4, 4, 2, 1, 2, 4, 4, 1, 2, 4, 4, 1, 1, 1, 1, 1, 4)
+group_T1_info$Pt_Clust <- c(2, 1, 1, 1, 2, 2, 1, 2, 2, 2, 1, 2, 2, 2, 2, 1, 1, 2, 1, 2, 1, 2, 1, 2, 2, 2, 2, 2, 2, 2, 2)
+group_T1_info$Mb_Clust <- c(2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 2, 1, 1, 1, 1, 2, 1, 1, 1, 2, 1, 1, 1, 1, 1, 2, 1, 1)
+
+group_subset1 <- subset(group_T1_info, Group_Clust == 1)
+group_subset2 <- subset(group_T1_info, Group_Clust == 2)
+group_subset3 <- subset(group_T1_info, Group_Clust == 3)
+group_subset4 <- subset(group_T1_info, Group_Clust == 4)
+```
+
+```{r}
+clin_data <- read.csv(here::here("Data", "CF_pex_clinical.txt"))
+
+clin_group1 <- data.frame(matrix(data = NA, nrow = nrow(group_subset1), ncol = length(clin_data)))
+colnames(clin_group1) <- colnames(clin_data)
+for(i in 1:nrow(clin_data)){
+  for(j in 1:nrow(group_subset1)){
+  if(clin_data$sid[i] == group_subset1$SID[j]){
+    clin_group1[j, ] <- clin_data[i, ]
+  }
+  }
+}
+clin_group2 <- data.frame(matrix(data = NA, nrow = nrow(group_subset2), ncol = length(clin_data)))
+colnames(clin_group2) <- colnames(clin_data)
+for(i in 1:nrow(clin_data)){
+  for(j in 1:nrow(group_subset2)){
+  if(clin_data$sid[i] == group_subset2$SID[j]){
+    clin_group2[j, ] <- clin_data[i, ]
+  }
+  }
+}
+clin_group3 <- data.frame(matrix(data = NA, nrow = nrow(group_subset3), ncol = length(clin_data)))
+colnames(clin_group3) <- colnames(clin_data)
+for(i in 1:nrow(clin_data)){
+  for(j in 1:nrow(group_subset3)){
+  if(clin_data$sid[i] == group_subset3$SID[j]){
+    clin_group3[j, ] <- clin_data[i, ]
+  }
+  }
+}
+clin_group4 <- data.frame(matrix(data = NA, nrow = nrow(group_subset4), ncol = length(clin_data)))
+colnames(clin_group4) <- colnames(clin_data)
+for(i in 1:nrow(clin_data)){
+  for(j in 1:nrow(group_subset4)){
+  if(clin_data$sid[i] == group_subset4$SID[j]){
+    clin_group4[j, ] <- clin_data[i, ]
+  }
+  }
+}
+
+clin_group1$group <- 1
+clin_group2$group <- 2
+clin_group3$group <- 3
+clin_group4$group <- 4
+
+clin_data_group <- rbind(clin_group1, clin_group2, clin_group3, clin_group4)
+```
+
+## Univariate ANOVAs
+
+Notes from Brandie: 
+
+Use univariate anovas to compare the groups
+- Sex, age, genotype, fev (adjusted is better for kids because it accounts for the size of the kids (size of lungs) and is instead percent predicted), pes may be interesting but everyone will probably have a high score T1 because experiencing exacerbation. Culture data probably not super important because of the mb data aiding in the grouping. Could also look at T2 pulmonary function to see if it improved compared to time 1 (is the change different across groups). Could still use clinical factors across timepoints rather than also making separate clusters across timepoints (did 1 group improve differently than other groups). Can combine the genotypes (do they have 2 copies of Del508, 1 copy, or 0 copies)
+
+- Start with univariable to see if it differs across groups at all rather than focusing on multiple things at once where it is harder to say what is happening. Like a table 1 (define groups by clustering and demographic information - are they different across the groups univarately). Even if things aren't significant we can look at what the top ranked things are - could pairwise test for top two to see if there is a difference between specific groups rather than across all groups but not worth doing for everything. 
+
+```{r}
+# Storage for p-values
+p_vals_univariate <- data.frame(matrix(data = NA, nrow = 2, ncol = length(clin_data_group)))
+colnames(p_vals_univariate) <- colnames(clin_data_group)
+rownames(p_vals_univariate) <- c("Unadjusted", "Adjusted")
+
+
+# Testing different categories -------------------------------------------------------
+#Variables to test: Sex, age, genotype, adjusted fev, pes, T2 pulmonary function, genotypes (combo) 
+  #Did Levene's test for homogeneity of variances to see if anova was appropriate and it looked good
+
+p_vals_univariate$gender[1] <- summary(aov(group ~ factor(gender), data = clin_data_group))[[1]][["Pr(>F)"]][1]
+
+p_vals_univariate$age[1] <- summary(aov(group ~ age, data = clin_data_group))[[1]][["Pr(>F)"]][1]
+
+
+library(stringr)
+clin_data_group$genotype_F508del <- str_count(paste(clin_data_group$genotypes1, clin_data_group$genotypes2), "F508del")
+  #Recodes to be based on the number of F508del genotypes per patient
+p_vals_univariate$genotype_F508del[1] <- summary(aov(group ~ genotype_F508del, data = clin_data_group))[[1]][["Pr(>F)"]][1]
+
+clin_data_group$fev1_tp1vs2 <- clin_data_group$tp1_fev1_pred - clin_data_group$tp2_fev1_pred
+clin_data_group$fev1_tp1vs3 <- clin_data_group$tp1_fev1_pred - clin_data_group$tp3_fev1_pred
+  #Creates values for difference in predicted fev 
+p_vals_univariate$tp1_fev1_pred[1] <- summary(aov(group ~ tp1_fev1_pred, data = clin_data_group))[[1]][["Pr(>F)"]][1]
+p_vals_univariate$tp2_fev1_pred[1] <- summary(aov(group ~ tp2_fev1_pred, data = clin_data_group))[[1]][["Pr(>F)"]][1]
+p_vals_univariate$tp3_fev1_pred[1] <- summary(aov(group ~ tp3_fev1_pred, data = clin_data_group))[[1]][["Pr(>F)"]][1]
+p_vals_univariate$fev1_tp1vs2[1] <- summary(aov(group ~ fev1_tp1vs2, data = clin_data_group))[[1]][["Pr(>F)"]][1]
+p_vals_univariate$fev1_tp1vs3[1] <- summary(aov(group ~ fev1_tp1vs3, data = clin_data_group))[[1]][["Pr(>F)"]][1]
+
+clin_data_group$fvc_tp1vs2 <- clin_data_group$tp1_fvc_pred - clin_data_group$tp2_fvc_pred
+clin_data_group$fvc_tp1vs3 <- clin_data_group$tp1_fvc_pred - clin_data_group$tp3_fvc_pred
+  #Creates values for difference in predicted fvc 
+p_vals_univariate$tp1_fvc_pred[1] <- summary(aov(group ~ tp1_fvc_pred, data = clin_data_group))[[1]][["Pr(>F)"]][1]
+p_vals_univariate$tp2_fvc_pred[1] <- summary(aov(group ~ tp2_fvc_pred, data = clin_data_group))[[1]][["Pr(>F)"]][1]
+p_vals_univariate$tp3_fvc_pred[1] <- summary(aov(group ~ tp3_fvc_pred, data = clin_data_group))[[1]][["Pr(>F)"]][1]
+p_vals_univariate$fvc_tp1vs2[1] <- summary(aov(group ~ fvc_tp1vs2, data = clin_data_group))[[1]][["Pr(>F)"]][1]
+p_vals_univariate$fvc_tp1vs3[1] <- summary(aov(group ~ fvc_tp1vs3, data = clin_data_group))[[1]][["Pr(>F)"]][1]
+
+clin_data_group$pes_tp1vs2 <- clin_data_group$tp1_pes_total - clin_data_group$tp2_pes_total
+clin_data_group$pes_tp1vs3 <- clin_data_group$tp1_pes_total - clin_data_group$tp3_pes_total
+  #Creates values for difference in pulmonary exacerbation score
+p_vals_univariate$tp1_pes_total[1] <- summary(aov(group ~ tp1_pes_total, data = clin_data_group))[[1]][["Pr(>F)"]][1]
+p_vals_univariate$tp2_pes_total[1] <- summary(aov(group ~ tp2_pes_total, data = clin_data_group))[[1]][["Pr(>F)"]][1]
+p_vals_univariate$tp3_pes_total[1] <- summary(aov(group ~ tp3_pes_total, data = clin_data_group))[[1]][["Pr(>F)"]][1]
+p_vals_univariate$pes_tp1vs2[1] <- summary(aov(group ~ pes_tp1vs2, data = clin_data_group))[[1]][["Pr(>F)"]][1]
+p_vals_univariate$pes_tp1vs3[1] <- summary(aov(group ~ pes_tp1vs3, data = clin_data_group))[[1]][["Pr(>F)"]][1]
+
+
+
+# Adjust p-values via. FDR: ---------------------------------------------------------------------------------------
+p_vals_univariate[2, ] <- p.adjust(p_vals_univariate[1,], method = "fdr")
+p_vals_univariate_NA <- p_vals_univariate[ , !is.na(p_vals_univariate[2, ])] #Remove columns with NAs
+sum(p_vals_univariate_NA[2, ] < 0.05)
+  #2 of the adjusted values were under the 0.05 cutoff! And there are 4 that are within the ballpark of 0.05. These are all the subtraction scores for fev and fvc, and the significant values were for the time 1 -> time 3 difference. It looks like there may be a clustering difference regarding recovery
+```
+
+Notes from Brandie: 
+
+If someone is in one group, maybe could monitor more based on their predicted recovery by cluster (could be viral vs. bacterial infection, but hard to figure out if viral and what immune system is responding to (respond differently, which could be showing groups))
+
+- Could do a pathway analysis with the proteins to see which ones are related to different types of immunity (interferon associated with viral). 
+- Can explore more with post-hoc testing to see which group(s) is driving difference in outcomes (what is different about that group in proteins/bacteria compared to other groups). Also would be interested in estimates for that group and the distributions for those among the groups. And making sure that everyone had all visits - is the difference due to missing data? Is it assuming 0 or NA or something else? Want to make sure not just difference in data collection. 
+
+Next step is trying to enter in a different distance matrix (Charlie is using Euclidian distance matrix) prior to using the clustering. There are other distance matrices (ecological) used for mb data that don't require transformation of data before use (simplifies process, adjusts for the many 0s in mb data). If samples are both missing something, Euclidian will assume they are more similar whereas ecological will treat it as a shared absence. We care more about what is there to cluster rather than what is missing. Guess is it is used for both omics and then inputted into clusters. Try to find in his code so that we can input two different matrices, 1 for each omic (harder, can we just swap it out for both for now) 
+
+
+```{r}
+# Post-hoc adjustments to figure out specific group differences looking at the significant or near significant p-values:
+
+## First check to see if there is any missing data among the future visits by group:
+  sum(is.na(clin_data_group$fev1_tp1vs2))
+    #3
+  sum(is.na(clin_data_group$fev1_tp1vs3))
+    #4
+  sum(is.na(clin_data_group$fvc_tp1vs2))
+    #3
+  sum(is.na(clin_data_group$fvc_tp1vs3))
+    #4
+  sum(is.na(clin_data_group$tp1_fev1_pred))
+    #1
+  sum(is.na(clin_data_group$tp2_fev1_pred))
+    #2
+  sum(is.na(clin_data_group$tp3_fev1_pred))
+    #3
+  sum(is.na(clin_data_group$tp1_fvc_pred))
+    #1
+  sum(is.na(clin_data_group$tp2_fvc_pred))
+    #2
+  sum(is.na(clin_data_group$tp3_fvc_pred))
+    #3
+        #No huge differences, but 3 does have more NAs, which maybe is why it is more significant?
+      # Check to see if there is a difference across the groups not just timepoints! Are the 3 missing in the same group or spread out? 
+  
+## First part b: Check to see if the significance changes when the NA values are removed
+  # Verifying that NAs don't drive group differences
+## Check for NAs by group
+
+sum(is.na(clin_data_group[clin_data_group$group == 1, ]$fev1_tp1vs2))
+  # 0
+sum(is.na(clin_data_group[clin_data_group$group == 2, ]$fev1_tp1vs2))
+  # 2
+sum(is.na(clin_data_group[clin_data_group$group == 3, ]$fev1_tp1vs2))
+  # 0 
+sum(is.na(clin_data_group[clin_data_group$group == 4, ]$fev1_tp1vs2))
+  # 1
+sum(is.na(clin_data_group[clin_data_group$group == 1, ]$fev1_tp1vs3))
+  # 0
+sum(is.na(clin_data_group[clin_data_group$group == 2, ]$fev1_tp1vs3))
+  # 3
+sum(is.na(clin_data_group[clin_data_group$group == 3, ]$fev1_tp1vs3))
+  # 0 
+sum(is.na(clin_data_group[clin_data_group$group == 4, ]$fev1_tp1vs3))
+  # 1
+sum(is.na(clin_data_group[clin_data_group$group == 1, ]$fvc_tp1vs2))
+  # 0
+sum(is.na(clin_data_group[clin_data_group$group == 2, ]$fvc_tp1vs2))
+  # 2
+sum(is.na(clin_data_group[clin_data_group$group == 3, ]$fvc_tp1vs2))
+  # 0 
+sum(is.na(clin_data_group[clin_data_group$group == 4, ]$fvc_tp1vs2))
+  # 1
+sum(is.na(clin_data_group[clin_data_group$group == 1, ]$fvc_tp1vs3))
+  # 0
+sum(is.na(clin_data_group[clin_data_group$group == 2, ]$fvc_tp1vs3))
+  # 3
+sum(is.na(clin_data_group[clin_data_group$group == 3, ]$fvc_tp1vs3))
+  # 0 
+sum(is.na(clin_data_group[clin_data_group$group == 4, ]$fvc_tp1vs3))
+  # 1
+    # 1 and 3 have the least different pairwise comparisons and also have no missing values, whereas the groups in 2 and 4 are the most different and also have some missing, but not a lot? And 4 is the most significant but is only missing 1 
+      #Proportion missing per group: 0/7 for 1, 2-3/10 so 20-30% in group 2, 0/6 for 3, 1/8 so 12.5% in group 4
+
+# Test to see if removing missing values still gives significance: 
+which(is.na(clin_data_group[clin_data_group$group == 2, ]$fvc_tp1vs3))
+  # 4,7,8
+which(is.na(clin_data_group[clin_data_group$group == 4, ]$fvc_tp1vs3))
+  # 1 
+
+clin_data_group_NAs <- clin_data_group
+clin_data_group_NAs <- clin_data_group_NAs[-c(11,14,15,24), ] # Removes rows with NAs at tp1vs3
+
+
+p_vals_NAs <- data.frame(matrix(NA, nrow = 2, ncol = 1))
+p_vals_NAs$fvc_tp1vs2[1] <- summary(aov(group ~ fvc_tp1vs2, data = clin_data_group))[[1]][["Pr(>F)"]][1]
+p_vals_NAs$fvc_tp1vs3[1] <- summary(aov(group ~ fvc_tp1vs3, data = clin_data_group))[[1]][["Pr(>F)"]][1]
+p_vals_NAs$fev1_tp1vs2[1] <- summary(aov(group ~ fev1_tp1vs2, data = clin_data_group))[[1]][["Pr(>F)"]][1]
+p_vals_NAs$fev1_tp1vs3[1] <- summary(aov(group ~ fev1_tp1vs3, data = clin_data_group))[[1]][["Pr(>F)"]][1]
+p_vals_NAs <- p_vals_NAs[ ,!is.na(p_vals_NAs[2, ])] #Remove columns with NAs
+p_vals_NAs[2, ] <- p.adjust(p_vals_NAs[1,], method = "fdr")
+  #This appears to be more significant because I only corrected for the 4 variables, but the baseline values that are uncorrected are not changed. 
+
+# Missing ANOVAs 
+missing_condition_T1vs2 <- matrix(c(0,7,2,8,0,6,1,7), nrow = 4, ncol = 2, byrow = TRUE)
+rownames(missing_condition_T1vs2) = c("Group1", "Group2", "Group3", "Group4")
+colnames(missing_condition_T1vs2) = c("Missing", "NonMissing")
+missing_condition_T1vs3 <- matrix(c(0,7,3,7,0,6,1,7), nrow = 4, ncol = 2, byrow = TRUE)
+rownames(missing_condition_T1vs3) = c("Group1", "Group2", "Group3", "Group4")
+colnames(missing_condition_T1vs3) = c("Missing", "NonMissing")
+
+fisher.test(missing_condition_T1vs2)
+fisher.test(missing_condition_T1vs3)
+  #Used fisher due to small sample sizes, the amount of missing is not significantly different by group
+
+## Second verify Levene's Test to see if the variances are equal and Tukey HSD is appropriate post-HOC:
+  library(car)
+    print(leveneTest(fvc_tp1vs2 ~ factor(group), clin_data_group))
+    #p-val = 0.3893 > 0.05 (equal variances)
+  print(leveneTest(fvc_tp1vs3 ~ factor(group), clin_data_group))
+    #p-val = 0.4561 > 0.05 (equal variances)
+  print(leveneTest(fev1_tp1vs2 ~ factor(group), clin_data_group))
+    #p-val = 0.8827 > 0.05 (equal variances)
+  print(leveneTest(fev1_tp1vs3 ~ factor(group), clin_data_group))
+    #p-val = 0.2578 > 0.05 (equal variances)
+
+## Third preform Tukey HSD:
+  mod_fvc_12 <- aov(fvc_tp1vs2 ~ factor(group), clin_data_group)
+  print(TukeyHSD(mod_fvc_12))
+    #Marginal significance group 4-2: 0.0769304
+  mod_fvc_13 <- aov(fvc_tp1vs3 ~ factor(group), clin_data_group)
+  print(TukeyHSD(mod_fvc_13))
+    #Marginal significance group 4-3: 0.0852907 and group 3-2: 0.0534391
+    #Significance group 4-1: 0.0174380 and 4-2: 0.0000841
+  mod_fev_12 <- aov(fev1_tp1vs2 ~ factor(group), clin_data_group)
+  print(TukeyHSD(mod_fev_12))
+    #Marginal significance group 4-2: 0.0582441
+  mod_fev_13 <- aov(fev1_tp1vs3 ~ factor(group), clin_data_group)
+  print(TukeyHSD(mod_fev_13))
+    #Marginal significance group 4-3: 0.0846243
+    #Significance group 4-1: 0.0259673 and group 4-2: 0.0008470
+  
+#Overall, for these significant ANOVA results, the groups that were the most significant were group 4-2 in all and group 4-1 in the 1vs3 groups. 
+  #There was also marginal significance for group 4-3 in the 1vs3 groups and for 3-2 in fvc 1vs3.
+  
+#Thus, it seems like group 4 is driving the results as it is most different from the other groups in the pairwise comparisons. Group 4 is smaller than the other groups (negative difference) and thus appears to have a faster recovery rate, as a higher FEV/FVC is better. 
+  #The difference is from time 1 - time x, so a more negative result aligns with a greater increase in FEV/FVC. 
+  #Since the 4-2 pairwise difference is the most significant, this implies that group 2 is recovering the slowest.
+    #Aligns with the signs of the estimates: if x - y is negative, then y is either greater than x and both are positive or y is smaller than x and both are negative. We are expecting the second one to be true.
+      #Graphs can help you think about this too
+```
+
+Next step is trying to enter in a different distance matrix (Charlie is using Euclidian distance matrix) prior to using the clustering. There are other distance matrices (ecological from package Vegan like breakharvest or morisita) used for mb data that don't require transformation of data (eg clr) before use (simplifies process, adjusts for the many 0s in mb data). If samples are both missing something, Euclidian will assume they are more similar whereas ecological will treat it as a shared absence. We care more about what is there to cluster rather than what is missing. Guess is it is used for both omics and then inputted into clusters. Try to find in his code so that we can input two different matrices, 1 for each omic (harder, can we just swap it out for both for now)
+
+- mbGMM for the clustering of just the mb data uses a Euclidian distance matrix, but this doesn't appear to matter for the overall clustering, which uses kmeans 
+- The heatmap clustering does appear to have an impact on the overall cluster, and if a gaussian kernal is specified, euclidian distance matrix is used. But, we have been specifying a spectrum kernal, which uses Rfast::Dist(t(mat)) in its code, which also uses euclidian. Could alternatively switch to hellinger methods. Thus, you could probably adjust the code to include an alternative kernal specification that uses a different distance matrix, which would be unique for either the mb or prot data, as their heatmaps are run separately and then later used to combine. 
+
+--------------------
+
+TODO: finish the anovas like checking for the difference in NAs by groups and making sure that is not driving the difference. What is the proportion of missing in one of the groups? Hoping it is clinical outcome not lack of reporting that is driving the difference (clinical)
+
+Try and change the distance matrix to see if you can do it (methods)
+
+Try to format a table for the paper (what we looked at across the 4 groups), plots for what you are focusing on (ex box plots for differences across the 4 groups), etc. for paper. Right now results are most relevant. Eventually also discussion (Brandie will help with intro, methods from Charlie). Methods with study design/what data is from Brenton's paper (he had a similar question using a different method, so comparing our results to his results will be useful for the discussion)
+
+Maybe try to figure out what those groups are relative to the features (what is driving the groups / what makes cluster 4 different based on the proteins and the microbiome data). Think about telling why to the clinician - why do these patients have better improvement (certain set of bugs, different responses, etc.)
+
+
+## Tables and figures for paper
+
+GGplot help from https://stackoverflow.com/questions/14604439/plot-multiple-boxplot-in-one-graph 
+```{r}
+library(reshape2)
+library(ggplot2)
+significant_diff_boxplot <- subset(clin_data_group, select = c(group, fev1_tp1vs2, fev1_tp1vs3, fvc_tp1vs2, fvc_tp1vs3))
+colnames(significant_diff_boxplot) <- c("group", "FEV Time 1 - 2", "FEV Time 1 - 3", "FVC Time 1 - 2", "FVC Time 1 - 3")
+df.m <- melt(significant_diff_boxplot, id.var = "group")
+
+#ggplot(data = df.m, aes(x=variable, y=value)) + geom_boxplot(aes(fill=factor(group)))
+
+p <- ggplot(data = df.m, aes(x=variable, y=value)) + 
+             geom_boxplot(aes(fill=factor(group)))
+#p + facet_wrap( ~ variable, scales="free")
+p <- p + xlab("Variable") + ylab("Difference") + ggtitle("Percent Predicted FEV and FVC Differences over Time by Group")
+p <- p + guides(fill=guide_legend(title="Cluster"))
+p
+```
+
+Using uniprot to upload the list of proteins from the proteomics file to determine which are immune system proteins/decide which may be relevant to test for differences by group (https://www.uniprot.org/id-mapping, see results at https://www.uniprot.org/tool-dashboard for first week or at https://www.uniprot.org/id-mapping/uniprotkb/f16336aa45b183a0bc0a8acadc6412456667266f/overview?facets=reviewed%3Atrue%2Cmodel_organism%3A9606&fields=accession%2Cid%2Cprotein_name%2Cgene_names%2Cgo_p%2Cgo_c%2Cgo%2Cgo_f). I also downloaded the file with all of the information - looks like there are 5 proteins that are immune system ?? 
+
+```{r}
+raw_prot <- read.csv(here::here("Data", "RawData_Soma_Prot.txt"))
+uniProt_raw <- raw_prot$UniProt
+#write.csv(uniProt_raw, file = "uniProt_raw.csv")
+immune_system_prots <- readxl::read_excel(here::here("Data", "UniProt Info/immuneSubset_2025_04_02.xlsx"))
+immune_system_prots$Entry
+  #Aligns with protein names in pt_T1 of LRIT2, LIRA5, CLM7, Eotaxin.2, and TLR4.MD.2.complex / TLR4
+
+prot_immune <- subset(pt_T1, select = c(LRIT2, LIRA5, CLM7, Eotaxin.2, TLR4, TLR4.MD.2.complex))
+
+prot_immune$group <- group_T1_info$Group_Clust
+
+# Test univariate anovas for these immune proteins
+p_vals_immune <- data.frame(matrix(NA, nrow = 2, ncol = 6))
+rownames(p_vals_immune) <- c("Unadjusted", "Adjusted")
+colnames(p_vals_immune) <- c("LRIT2", "LIRA5", "CLM7", "Eotaxin.2", "TLR4", "TLR4.MD.2.complex")
+
+p_vals_immune$LRIT2[1] <- summary(aov(group ~ LRIT2, 
+                                      data = prot_immune))[[1]][["Pr(>F)"]][1]
+p_vals_immune$LIRA5[1] <- summary(aov(group ~ LIRA5, 
+                                      data = prot_immune))[[1]][["Pr(>F)"]][1]
+p_vals_immune$CLM7[1] <- summary(aov(group ~ CLM7, 
+                                     data = prot_immune))[[1]][["Pr(>F)"]][1]
+p_vals_immune$Eotaxin.2[1] <- summary(aov(group ~ Eotaxin.2, 
+                                      data = prot_immune))[[1]][["Pr(>F)"]][1]
+p_vals_immune$TLR4[1] <- summary(aov(group ~ TLR4, 
+                                      data = prot_immune))[[1]][["Pr(>F)"]][1]
+p_vals_immune$TLR4.MD.2.complex[1] <- summary(aov(group ~ TLR4.MD.2.complex, 
+                                      data = prot_immune))[[1]][["Pr(>F)"]][1]
+
+p_vals_immune[2, ] <- p.adjust(p_vals_immune[1,], method = "fdr")
+
+p_vals_immune
+  # None of these are significant with a 0.05 cutoff, but LRIT2 and Eotaxin.2 show marginal significance around 0.08 after adjustment.
+```
+
+
+TODO: 
+COuld be that the healthier patients didnt come back for folloup appointments - check to see if there is a difference between the baseline values for those that were missing and those that were not missing. Could use a Chi-squared table treating missing as a 1/0 condition to see if groups have more NAs than others (know to be true but also very small nuymbers - makes sense that biggest group has most missing)
+
+
+Can change to % of the genotypes that are 0, 1, 2 (three rows)
+
+Might be good to swap to 3-1 and 2-1 to subtract the baseline for FEV/FVC/PES for easier interpretation 
+
+Use an array (do loop) same thing a lot of times and do an anova for lots of proteins to see which are driving the differences by groups and then look up what they are in uniprot 
+
+Could use the R code for uniprot that helps (bioconductor) but do the anovas first 
+
+Table for paper 
+```{r}
+group_summary_data <- matrix(NA, nrow = 4, ncol = 12)
+rownames(group_summary_data) <- c("Group 1", "Group 2", "Group 3", "Group 4")
+colnames(group_summary_data) <- c("Num_Subjects", "Age", "Per_Male", "F508del0", 
+                                  "F508del1", "F508del2", "PES_T12", "PES_T13", 
+                                  "FEV_T12", "FEV_T13", "FVC_T12", "FVC_T13")
+group_summary_data <- data.frame(group_summary_data)
+
+clin_data_group$fev_tp3vs1 <- clin_data_group$tp3_fev1_pred - clin_data_group$tp1_fev1_pred
+clin_data_group$fev_tp2vs1 <- clin_data_group$tp2_fev1_pred - clin_data_group$tp1_fev1_pred
+clin_data_group$fvc_tp3vs1 <- clin_data_group$tp3_fvc_pred - clin_data_group$tp1_fvc_pred
+clin_data_group$fvc_tp2vs1 <- clin_data_group$tp2_fvc_pred - clin_data_group$tp1_fvc_pred
+clin_data_group$pes_tp3vs1 <- clin_data_group$tp3_pes_total - clin_data_group$tp1_pes_total
+clin_data_group$pes_tp2vs1 <- clin_data_group$tp2_pes_total - clin_data_group$tp1_pes_total
+
+for(i in 1:4){
+  group_summary_data$Num_Subjects[i] <- toString(nrow(clin_data_group[clin_data_group$group == i, ]))
+    #People in each group
+  group_summary_data$Age[i] <- mean(clin_data_group[clin_data_group$group == i, ]$age) 
+    #mean age
+  group_summary_data$Per_Male[i] <- round(sum(clin_data_group[clin_data_group$group == i, ]$gender == 1) /
+                                          nrow(clin_data_group[clin_data_group$group == i, ]) * 100, digits = 1) 
+    #proportion gender = 1 (1 is always male)
+  group_summary_data$F508del0[i] <- round(sum(clin_data_group[clin_data_group$group == i, ]$genotype_F508del == 0
+                                        ) / sum(clin_data_group[clin_data_group$group == i, ]$genotype_F508del), digits = 3) * 100
+    #% of F508del genotypes that are 0
+  group_summary_data$F508del1[i] <- round(sum(clin_data_group[clin_data_group$group == i, ]$genotype_F508del == 1
+                                        ) / sum(clin_data_group[clin_data_group$group == i, ]$genotype_F508del), digits = 3) * 100
+    #% of F508del genotypes that are 1
+  group_summary_data$F508del2[i] <- round(sum(clin_data_group[clin_data_group$group == i, ]$genotype_F508del == 2
+                                        ) / sum(clin_data_group[clin_data_group$group == i, ]$genotype_F508del), digits = 3) * 100
+    #% of F508del genotypes that are 2
+  group_summary_data$PES_T12[i] <- mean(na.omit(clin_data_group[clin_data_group$group == i, ]$pes_tp2vs1)) 
+    #mean pes difference time 1 - 2 (removing NAs)
+  group_summary_data$PES_T13[i] <- mean(na.omit(clin_data_group[clin_data_group$group == i, ]$pes_tp3vs1))
+    #mean pes difference time 1 - 3 (removing NAs)
+  group_summary_data$FEV_T12[i] <- mean(na.omit(clin_data_group[clin_data_group$group == i, ]$fev_tp2vs1))
+    #mean FEV difference time 1 - 2 (removing NAs)
+  group_summary_data$FEV_T13[i] <- mean(na.omit(clin_data_group[clin_data_group$group == i, ]$fev_tp3vs1))
+    #mean FEV difference time 1 - 3 (removing NAs)
+  group_summary_data$FVC_T12[i] <- mean(na.omit(clin_data_group[clin_data_group$group == i, ]$fvc_tp2vs1))
+    #mean FVC difference time 1 - 2 (removing NAs)
+  group_summary_data$FVC_T13[i] <- mean(na.omit(clin_data_group[clin_data_group$group == i, ]$fvc_tp3vs1))
+    #mean FVC difference time 1 - 3 (removing NAs)
+}
+library(kableExtra)
+library(dplyr)
+
+colnames(group_summary_data) <- c("Number of Patients", "Mean Age", "% Male", "% 0 F508del Genotype", "% 1 F508del Genotype", "% 2 F508del Genotype", "Mean PES Difference Time 2-1", "Mean PES Difference Time 3-1", "*Mean FEV Difference Time 2-1", "*Mean FEV Difference Time 3-1", "*Mean FVC Difference Time 2-1", "*Mean FVC Difference Time 3-1")
+
+t(group_summary_data) %>%
+  kbl() %>%
+  kable_styling()
+```
+
+```{r}
+mb_T1_group <- cbind(group = c(3, 2, 2, 3, 1, 3, 3, 3, 3, 1, 2, 3, 1, 3, 4, 4, 2, 1, 2, 4, 4, 1, 2, 4, 4, 1, 1, 1, 1, 1, 4), mb_T1)
+p_vals_bac <- data.frame(matrix(NA, nrow = 2, ncol = ncol(mb_T1)))
+for(i in 2:ncol(mb_T1_group)){
+  anova_test <- aov(group ~ mb_T1_group[,i], data = mb_T1_group)
+  p_vals_bac[1,i-1] <- summary(anova_test)[[1]][["Pr(>F)"]][1]
+}
+
+pt_T1_group <- cbind(group = c(3, 2, 2, 3, 1, 3, 3, 3, 3, 1, 2, 3, 1, 3, 4, 4, 2, 1, 2, 4, 4, 1, 2, 4, 4, 1, 1, 1, 1, 1, 4), pt_T1)
+p_vals_prot <- data.frame(matrix(NA, nrow = 2, ncol = ncol(pt_T1)))
+for(i in 2:ncol(pt_T1_group)){
+  anova_test <- aov(group ~ pt_T1_group[,i], data = pt_T1_group)
+  p_vals_prot[1,i-1] <- summary(anova_test)[[1]][["Pr(>F)"]][1]
+}
+
+p_vals_bac[2, ] <- p.adjust(p_vals_bac[1,], method = "fdr", n = length(p_vals_bac) + length(p_vals_prot))
+p_vals_prot[2, ] <- p.adjust(p_vals_prot[1,], method = "fdr", n = length(p_vals_bac) + length(p_vals_prot))
+colnames(p_vals_bac) <- colnames(mb_T1)
+
+which(p_vals_bac[2,] <= 0.05); p_vals_bac[2,24]; p_vals_bac[2,26]
+  # 2 are under 0.05 threshold after adjustment: 24 and 26 both around 0.01-0.02
+    colnames(mb_T1)[24]; colnames(mb_T1)[26]
+      # These align with bacteria "Granulicatella" and "Lachnoanaerobaculum"
+which(p_vals_prot[2,] <= 0.05); p_vals_prot[2,2360]
+  # 2360 is under 0.05 threshold after adjustment at 0.0012
+    colnames(pt_T1)[2360]
+      #"FTMT" - which aligns with uniprot Q8N4E7 (from raw data)
+```
+FTMT is Ferritin, and deals with iron uptake and transport. Specifically, it catalyzes the oxidation of ferrous iron(II) to ferric iron(III) and stores iron in a soluble, non-toxic, readily available form (PubMed:11323407, PubMed:15201052). Important for iron homeostasis (PubMed:11323407, PubMed:15201052). Iron is taken up in the ferrous form and deposited as ferric hydroxides after oxidation (PubMed:11323407, PubMed:15201052).
+
+```{r}
+#sig_bac_prot <- data.frame(cbind(mb_T1_group$group, mb_T1_group$Granulicatella, mb_T1_group$Lachnoanaerobaculum, pt_T1$FTMT))
+#colnames(sig_bac_prot) <- c("group", "Granulicatella", "Lachnoanaerobaculum", "FTMT")
+#plot(sig_bac_prot$Granulicatella, factor(sig_bac_prot$group))
+
+
+library(reshape2)
+library(ggplot2)
+sig_bac_prot <- data.frame(cbind(mb_T1_group$group, mb_T1_group$Granulicatella, mb_T1_group$Lachnoanaerobaculum, pt_T1$FTMT))
+colnames(sig_bac_prot) <- c("group", "Granulicatella", "Lachnoanaerobaculum", "FTMT")
+df.m <- melt(sig_bac_prot, id.var = "group")
+
+p <- ggplot(data = df.m, aes(x=variable, y=value)) + 
+             geom_boxplot(aes(fill=factor(group)))
+p <- p + xlab("Variable") + ylab("CLR(rel abundance) for bacteria, log2(RFU) for proteins") + ggtitle("Difference in Significant Bacterial and Protein Amounts by Group")
+p <- p + guides(fill=guide_legend(title="Cluster"))
+p + facet_wrap( ~ variable, scales="free")
+```
+
+
+Can try to redo these graphs for the common bacterial suspects: Pseudomonas, Staph, strep, etc. How do these look across the clusters. For proteins, look for elastase or interleukins (IL6 or IL8)
+
+```{r}
+library(reshape2)
+library(ggplot2)
+common_bac_prot <- data.frame(cbind(mb_T1_group$group, mb_T1_group$Pseudomonas, mb_T1_group$Staphylococcus, mb_T1_group$Streptococcus, pt_T1$Elastase, pt_T1$IL.6, pt_T1$IL.8))
+colnames(common_bac_prot) <- c("group", "Pseudomonas", "Staphylococcus", "Streptococcus", "Elastase", "IL-6", "IL-8")
+
+df.m <- melt(common_bac_prot, id.var = "group")
+
+p <- ggplot(data = df.m, aes(x=variable, y=value)) + 
+             geom_boxplot(aes(fill=factor(group)))
+p <- p + xlab("Variable") + ylab("CLR(rel abundance) for bacteria, log2(RFU) for proteins") + ggtitle("Difference in Common Bacterial and Protein Amounts by Group")
+p <- p + guides(fill=guide_legend(title="Cluster"))
+p + facet_wrap( ~ variable, scales="free")
+```
+
+Group 3 might be driven by non-common bugs like prevotella and neisseria and veillonella and rothia and haemophilus (also maybe burkholderia but I think that has low amounts here) because it has high inflamation but not higher levels of these bugs. Group 2 has higher pseudomonas but lower inflamation and group 1 has lower pseudomonas
+
+Can try to sort the p-values as well to see what are generally more significant
+```{r}
+p_vals_bac_t <- data.frame(t(p_vals_bac))
+colnames(p_vals_bac_t) <- c("Unadjusted", "FDR")
+p_vals_bac_t <- p_vals_bac_t[order(p_vals_bac_t$Unadjusted), ]
+rownames(p_vals_bac_t[1:15,])
+  # Top 15 significant bacteria
+```
+Granulicatella, Neisseriaceae (higher level up from neisseria), and Stenotrophomonas are relevant ones here 
+
+
+If we cluster each omic individually and then use the illuvia plot to track how they cluster across individual and overall clusters (2 versions instead of trying to do all in 1 plot)
+
+illuvial function good to get in the right format but otherwise shouldn't be too hard. Can also do it within ggplot
+
+row = person 
+different columns can be text for what group they're in
+(might need to transpose the group data).
+
+Actually might need to be a frequency table to count how many are in each pattern of data (eg. how many are in group 1/1/3).
+
+ggalluvial for ggplot so you can add fun colors, etc. 
+
+simple alluvial - specify columns and which column has the counts
+
+
+```{r}
+library(alluvial)
+#tit <- as.data.frame(Titanic)
+#tit2d <- aggregate( Freq ~ Class + Survived, data=tit, sum)
+#alluvial( tit2d[,1:2], freq=tit2d$Freq, xw=0.0, alpha=0.8,
+#         gap.width=0.1, col= "steelblue", border="white",
+#         layer = tit2d$Survived != "Yes" )
+
+group_T1_info$SID <- c(26,27,28,30,33,35,37,38,39,41,42,44,46,48,50,51,52,53,57,59,61,62,63,64,66,67,68,69,70,72,74)
+#group_T1_info$Group_Clust <- c(4, 3, 3, 4, 2, 4, 4, 4, 4, 2, 3, 4, 2, 4, 1, 1, 3, 2, 3, 1, 1, 2, 3, 1, 1, 2, 2, 2, 2, 2, 1)
+group_T1_info$Group_Clust <- c(3, 2, 2, 3, 1, 3, 3, 3, 3, 1, 2, 3, 1, 3, 4, 4, 2, 1, 2, 4, 4, 1, 2, 4, 4, 1, 1, 1, 1, 1, 4)
+group_T1_info$Pt_Clust <- c(2, 1, 1, 1, 2, 2, 1, 2, 2, 2, 1, 2, 2, 2, 2, 1, 1, 2, 1, 2, 1, 2, 1, 2, 2, 2, 2, 2, 2, 2, 2)
+group_T1_info$Mb_Clust <- c(2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 2, 1, 1, 1, 1, 2, 1, 1, 1, 2, 1, 1, 1, 1, 1, 2, 1, 1)
+
+alluv_group_pt <- matrix(c(sum(group_T1_info$Group_Clust == 1 & group_T1_info$Pt_Clust == 1), 
+                           sum(group_T1_info$Group_Clust == 1 & group_T1_info$Pt_Clust == 2),
+                           sum(group_T1_info$Group_Clust == 2 & group_T1_info$Pt_Clust == 1),
+                           sum(group_T1_info$Group_Clust == 2 & group_T1_info$Pt_Clust == 2),
+                           sum(group_T1_info$Group_Clust == 3 & group_T1_info$Pt_Clust == 1),
+                           sum(group_T1_info$Group_Clust == 3 & group_T1_info$Pt_Clust == 2),
+                           sum(group_T1_info$Group_Clust == 4 & group_T1_info$Pt_Clust == 1),
+                           sum(group_T1_info$Group_Clust == 4 & group_T1_info$Pt_Clust == 2)),
+                         nrow = 4, ncol = 2, byrow = TRUE)
+colnames(alluv_group_pt) = c("Pt1", "Pt2"); rownames(alluv_group_pt) = c("Group1", "Group2", "Group3", "Group4")
+
+alluv_group_mb <- matrix(c(sum(group_T1_info$Group_Clust == 1 & group_T1_info$Mb_Clust == 1), 
+                           sum(group_T1_info$Group_Clust == 1 & group_T1_info$Mb_Clust == 2),
+                           sum(group_T1_info$Group_Clust == 2 & group_T1_info$Mb_Clust == 1),
+                           sum(group_T1_info$Group_Clust == 2 & group_T1_info$Mb_Clust == 2),
+                           sum(group_T1_info$Group_Clust == 3 & group_T1_info$Mb_Clust == 1),
+                           sum(group_T1_info$Group_Clust == 3 & group_T1_info$Mb_Clust == 2),
+                           sum(group_T1_info$Group_Clust == 4 & group_T1_info$Mb_Clust == 1),
+                           sum(group_T1_info$Group_Clust == 4 & group_T1_info$Mb_Clust == 2)),
+                         nrow = 4, ncol = 2, byrow = TRUE)
+colnames(alluv_group_mb) = c("Mb1", "Mb2"); rownames(alluv_group_mb) = c("Group1", "Group2", "Group3", "Group4")
+
+alluv_datPt <- as.data.frame(matrix(NA, nrow = 8, ncol = 3)); colnames(alluv_datPt) = c("Group", "Pt", "Freq")
+alluv_datPt$Group <- factor(rep(1:4, each = 2))
+alluv_datPt$Pt <- factor(rep(1:2, times = 4))
+alluv_datPt$Freq <- c(alluv_group_pt[1,1], alluv_group_pt[1,2],
+                      alluv_group_pt[2,1], alluv_group_pt[2,2],
+                      alluv_group_pt[3,1], alluv_group_pt[3,2], 
+                      alluv_group_pt[4,1], alluv_group_pt[4,2])
+alluv_datMb <- as.data.frame(matrix(NA, nrow = 8, ncol = 3)); colnames(alluv_datMb) = c("Group", "Mb", "Freq")
+alluv_datMb$Group <- factor(rep(1:4, each = 2))
+alluv_datMb$Mb <- factor(rep(1:2, times = 4))
+alluv_datMb$Freq <- c(alluv_group_mb[1,1], alluv_group_mb[1,2],
+                      alluv_group_mb[2,1], alluv_group_mb[2,2],
+                      alluv_group_mb[3,1], alluv_group_mb[3,2], 
+                      alluv_group_mb[4,1], alluv_group_mb[4,2])
+
+
+alluvial(alluv_datPt[,1:2], freq=alluv_datPt$Freq, xw=0.0, alpha=0.8,
+         gap.width=0.1, col= "steelblue", border="white",
+         layer = alluv_datPt$Pt != "1" )
+
+alluvial(alluv_datMb[,1:2], freq=alluv_datMb$Freq, xw=0.0, alpha=0.8,
+         gap.width=0.1, col= "steelblue", border="white",
+         layer = alluv_datMb$Mb != "1" )
+
+temp <- cbind(alluv_datPt$Freq, alluv_datMb$Freq)
+group_T1_info$dummy <- rep(1, times = 31)
+frequencies <- ftable(xtabs( ~ Group_Clust + Pt_Clust + Mb_Clust + dummy, data = group_T1_info))
+
+freqDF <- as.data.frame(frequencies)
+
+alluvial(freqDF[,1:3], freq=freqDF$Freq, xw=0.0, alpha=0.8,
+         gap.width=0.1, col= "steelblue", border="white",
+         layer = freqDF$Group_Clust != "1" )
+```
+
+```{r}
+library(reshape2)
+library(ggplot2)
+
+for(i in 1:nrow(clin_data_group)){ # Convert group # to recovery status
+  if(is.na(clin_data_group$group[i])){
+  }
+  else{
+    if(clin_data_group$group[i] == 1){
+      clin_data_group$recovery[i] <- "Average"
+    }
+    if(clin_data_group$group[i] == 2){
+      clin_data_group$recovery[i] <- "Slow"
+    }
+    if(clin_data_group$group[i] == 3){
+      clin_data_group$recovery[i] <- "Average"
+    }
+    if(clin_data_group$group[i] == 4){
+      clin_data_group$recovery[i] <- "Fast"
+    }
+  }
+}
+
+significant_diff_boxplot <- subset(clin_data_group, select = c(group, fev_tp2vs1, fev_tp3vs1, fvc_tp2vs1, fvc_tp3vs1))
+colnames(significant_diff_boxplot) <- c("recovery", "FEV Time 2 - 1", "FEV Time 3 - 1", "FVC Time 2 - 1", "FVC Time 3 - 1")
+df.m <- melt(significant_diff_boxplot, id.var = "recovery")
+
+p <- ggplot(data = df.m, aes(x=variable, y=value)) + 
+             geom_boxplot(aes(fill=factor(recovery)))
+#p + facet_wrap( ~ variable, scales="free")
+p <- p + xlab("Variable") + ylab("Difference") + ggtitle("Percent Predicted FEV and FVC Differences over Time by Group")
+p <- p + guides(fill=guide_legend(title="Cluster"))
+p
+```
+
+Looks like the mb groups are driving the differences in the overall groups more than the pt groups (they are more consistent/stable whereas the pt groups had more crossover). When looking at them overall, the overall cluster is giving additional information than just the two pt and mb clusts (no pair of pt and mb perfectly goes into one group clust)
+
+Can create a frequency table with both mb and pt as columns and adjust the frequency
+
+Can we do this again just looking at the joint clustering if you say there is 4,5,6 groups (how are the groups splitting up or is there switching? How sensitive are the groups to the number of clusters we pre-specify?)
+
+Can also make the above plots for the fungal data info, should hopefully be straightforward (do for fung/mb vs group and group 3vs4vs5... clusts). Also what happens to the fungal data if we run it through Charlie's code from the raw data? Wont be this week because it needs to be cleaned 
+
+```{r}
+mb_LapSft <- gaussLaplac(mb_T1, lap.type = 'shift', 
+                         kernel = "Spectrum", plots = FALSE)
+prot_LapSft <- gaussLaplac(pt_T1, lap.type = 'shift',
+                        kernel = "Spectrum", plots = FALSE)
+mb_eigSft <- eigen(mb_LapSft)
+prot_eigSft <- eigen(prot_LapSft)
+
+# Spectral Clustering -----------------------------------------------------
+
+# * MB --------------------------------------------------------------------
+
+mb_vecs <- mb_eigSft$vectors
+
+mk <- 2
+mbInd <- 1:mk
+mbv <- mb_vecs[,mbInd]
+
+mbGMM <- GMM(mbv, mk, dist_mode = 'eucl_dist', #Probably used this one for mb because it is messier than proteomics. kmeans is more standard (below) and proteomics is cleaner
+             em_iter = 15)
+mbClust <- predict(mbGMM, newdata = mbv)
+
+# * Prots -----------------------------------------------------------------
+
+pk <- 2 #Changed to 2 based off adjusted eigenvalue graph (was 3)
+
+# protInd <- (ncol(prot_eigRw$vectors)-pk+1):ncol(prot_eigRw$vectors)
+protInd <- 1:pk
+pev <- prot_eigSft$vectors[,protInd] 
+
+set.seed(10)
+protClust <- kmeans(pev, pk, nstart=5)$cluster
+
+# Combo -------------------------------------------------------------------
+
+## Rank K approximations
+mb_apx <- LapSig(mb_LapSft, mk, lap.type = "shift")
+prot_apx <- LapSig(prot_LapSft, pk, lap.type = "shift")
+
+apxLSft <- mb_apx/2 + prot_apx/2
+
+# * Spec Clust ------------------------------------------------------------
+
+apx_eigSft <- eigen(apxLSft) ## Get eigenvalues and eigenvectors 
+apxV <- apx_eigSft$vectors[,1:sum(pk,mk)]
+
+Up <- prot_eigSft$vectors[, protInd]
+Um <- mb_eigSft$vectors[,mbInd]
+
+flm <- flmSym <- flagMean(list(Up, Um), plots = FALSE)
+flm.vecs <- flm$u
+
+#NbClust(flm.vecs, method = 'kmeans', index='alllong')
+#par(mfrow=c(1,1))
+
+# Fk <- 4
+set.seed(235)
+# flgClust <- kmeans(flm.vecs[,1:4], centers = Fk, nstart = 10)$cluster
+
+clusters <- as.data.frame(matrix(NA, nrow = 31, ncol = 6)); colnames(clusters) <- c("C2", "C3", "C4", "C5", "C6")
+for(i in 2:6){
+  Fk <- i
+  set.seed(4)
+  apxClustSft <- kmeans(flm.vecs[,1:4], centers = Fk, nstart = 10)$cluster #Cluster them into i groups #SWAPPED TO second clustering method
+  clusters[,i-1] <- apxClustSft
+}
+
+clusters$dummy <- rep(1, times = 31)
+frequencies <- ftable(xtabs( ~C6 + C5 + C4 + C3 + C2 + dummy, data = clusters))
+freqDF <- as.data.frame(frequencies)
+alluvial(freqDF[,1:5], freq=freqDF$Freq, xw=0.0, alpha=0.8,
+         gap.width=0.1, col= "steelblue", border="white")
+
+
+# ggclusts <- as.data.frame(matrix(c(rep(group_T1_info$SID, times = 5), clusters$C2, clusters$C3, clusters$C4, clusters$C5, clusters$C6, rep(2:6, each = 31)), byrow = FALSE, nrow = 155, ncol = 3)); colnames(ggclusts) <- c("SID", "Cluster", "NumClusts")
+# 
+# library(ggalluvial)
+# ggplot(ggclusts, aes(x = Cluster, stratum = NumClusts, alluvium = SID)) +
+#   geom_alluvium(aes(fill = NumClusts)) +
+#   geom_stratum()
+# 
+# 
+# subject = SID, collection = clust, class or category = NumClusts
+
+ggplot(data = freqDF,
+       aes(axis1 = C2, axis2 = C3, axis3 = C4, axis4 = C5,
+           y = Freq)) + 
+  geom_alluvium(aes(fill = C6)) + 
+  geom_stratum() +
+  geom_text(stat = "stratum", aes(label = after_stat(stratum))) + 
+  theme_minimal()
+
+
+ggplot(data = freqDF,
+       aes(axis1 = C3, axis2 = C4, axis3 = C5, axis4 = C6,
+           y = Freq)) + 
+  geom_alluvium(aes(fill = C2)) + 
+  geom_stratum() +
+  geom_text(stat = "stratum", aes(label = after_stat(stratum))) + 
+  theme_minimal()
+```
