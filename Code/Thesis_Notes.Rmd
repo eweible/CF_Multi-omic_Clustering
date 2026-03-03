@@ -49,6 +49,327 @@ In this document, I would like to revise my work from Compiled_Notes to be more 
   - Use Levenes test to see if the variances are equal and Tukey HSD is appropriate post-hoc
   - Perform TUkey HSD
   
+  
+  
+  
+# Revised methods steps:
+
+## Data Processing
+
+Overview: Microbiome sequencing data and SomaScan proteomic data were processed separately at each time point (1, 2, and 3). Time Point 1 served as the primary dataset for downstream analyses, while later time points were cleaned using the same pipeline for potential comparisons. All processing was performed in R using tidyverse workflows.
+
+1. Subsetting to the target time point
+
+- For each time point, raw microbiome sequencing data were filtered to include only samples collected at that time (e.g., time == 1 for Time Point 1).
+
+2. Constructing a taxa-by-subject count matrix
+
+- Samples were retained only if:
+  - They had more than one sequencing record for the subject , and
+  - seq_count was non-missing.
+Counts were then reshaped into a wide matrix with subjects as rows and taxa as columns.
+
+3. Prevalence and abundance filtering
+
+- Two filters were applied to remove rare taxa:
+  - Minimum relative abundance filter:
+    - Taxa were retained if they reached at least 0.1\% relative abundance in at least one child.
+  - Prevalence filter: 
+    - Taxa were retained if present in at least 10\% of children (at least 3 subjects at Time Point 1).
+- Both filters were applied simultaneously to produce the final filtered taxa matrix.
+
+4. Outlier subject removal
+
+- Principal components of the CLR-transformed microbiome matrix were inspected for outliers.
+  - Subject 49 was identified as an outlier at Time Points 1 and 2.
+  - Subject 55 was identified as an outlier at Time Point 3.
+  - These subjects were removed prior to normalization.
+
+5. CLR transformation
+
+-  For each subject:
+  - Total sequencing depth was computed.
+  - A pseudocount of 1/depth was added to all taxa.
+  - Centered log-ratio (CLR) transformation was applied.
+- The resulting CLR-transformed matrices were used for downstream analyses.
+
+## Clustering Analysis
+
+Oveview: Microbiome (MB) and proteomic (PT) datasets from Time Point 1 were analyzed using spectral methods to identify shared subject‑level structure across the two omics layers. The analysis proceeded by (1) constructing graph Laplacians for each dataset, (2) extracting spectral embeddings via eigen-decomposition, (3) selecting cluster‑informative subspaces, and (4) computing the flag mean to obtain a joint low‑dimensional representation for integrated clustering.
+
+#### Graph Construction and Laplacians
+
+1. Adjacency matrices
+
+- For each dataset (MB and PT), an adjacency matrix was constructed using the Spectrum CNN kernel, which computes similarity between subjects based on their feature profiles. Diagonal entries were set to zero to enforce a proper graph structure.
+
+2. Shifted graph Laplacian
+
+- A shifted Laplacian was computed for each adjacency matrix: $L = I + D^{-1/2}AD^{-1/2}$ where A is the adjacency matrix and D is the degree matrix. This form preserves positive eigenvalues and stabilizes the spectral embedding.
+
+3. Eigen-decomposition
+
+- Eigenvalues and eigenvectors of each Laplacian were computed.
+- The eigenvectors associated with the smallest eigenvalues (for the shifted Laplacian, the first  eigenvectors) were used as spectral embeddings for clustering.
+
+#### Individual Dataset Clustering
+
+These individual clusterings were used only for exploratory comparison and not for the final integrated clustering.
+
+1. Microbiome clustering
+
+- The first two Laplacian eigenvectors were selected as the MB spectral embedding.
+- Because the MB structure was noisier, subjects were clustered using a Gaussian Mixture Model with Euclidean distance.
+
+2. Proteomics clustering
+
+- The first two Laplacian eigenvectors were selected as the PT spectral embedding.
+- Subjects were clustered using k‑means, which performed well due to cleaner PT structure.
+
+#### Rank‑k Laplacian Approximations 
+
+This step was exploratory and not used in the final analysis.
+
+For completeness, rank‑ approximations of each Laplacian were computed using the top eigenvectors and eigenvalues.
+The MB and PT approximations were averaged to form a combined Laplacian, which was then spectrally clustered.
+The optimal number of clusters was estimated using NbClust (traceW criterion), which consistently suggested four clusters.
+
+#### Flag Mean Joint Clustering
+
+1. Extracting subspaces
+
+- For each dataset:
+  - The first  Laplacian eigenvectors were extracted.
+  - These eigenvectors form an orthonormal basis representing the cluster‑informative subspace for that dataset.
+
+2. Computing the flag mean
+
+- The MB and PT subspaces were combined using the flag mean, which computes a geometric average of multiple subspaces via SVD of their concatenation.
+- The resulting matrix provides a shared embedding capturing structure common to both omics layers.
+
+3. Determining the number of clusters
+
+- The optimal number of clusters in the joint embedding was estimated using NbClust with the traceW index, again selecting four clusters.
+
+4. Clustering the flag‑mean embedding
+
+- The first four columns of the flag‑mean basis were used as the joint embedding.
+- Subjects were clustered using k‑means with four clusters.
+- A 3D projection of the embedding (2–4) was used for visualization.
+
+## Clinical Analysis
+
+Overview: Clinical variables were compared across the four subject clusters identified from the flag‑mean integrated embedding. The goal was to determine whether the joint MB–PT clusters corresponded to meaningful differences in demographic or clinical characteristics, including pulmonary function and exacerbation severity.
+
+#### Assigning Subjects to Clusters
+
+1. Constructing the cluster membership table
+
+- A subject‑level table was created containing:
+  - Subject ID
+  - Final flag‑mean cluster assignment
+  - Individual proteomic cluster (PT)
+  - Individual microbiome cluster (MB)
+- This table allowed clinical data to be merged with cluster labels and enabled comparison of clinical outcomes across groups.
+
+2. Subsetting subjects by cluster
+
+- Subjects were split into four groups based on their flag‑mean cluster (Groups 1–4).
+- These subsets were used to extract matching clinical records for each cluster.
+
+#### Merging Clinical Data With Cluster Assignments
+
+1. Clinical dataset
+
+- Clinical data included:
+  - Demographics (sex, age)
+  - CFTR genotype
+  - Pulmonary function (FEV1% predicted, FVC% predicted) at Time Points 1–3
+  - Pulmonary Exacerbation Score (PES) at Time Points 1–3
+  - Culture results and other clinical variables
+
+2. Matching subjects to clinical records
+
+- For each cluster:
+  - A new clinical dataset was created with the same number of rows as subjects in that cluster.
+  - Clinical records were matched by subject ID.
+  - A group variable was added to indicate cluster membership.
+- The four cluster‑specific datasets were then combined into a single clinical dataset containing all subjects and their cluster labels.
+
+#### Derived Clinical Variables
+
+- Several clinically meaningful difference scores were computed to evaluate recovery trajectories:
+  - Change in FEV1
+  - Change in FVC
+  - Change in PES
+  - Recoding of genotype to number of F508del alleles
+
+#### Univatiate Statistical Testing
+
+1. ANOVA framework
+
+- Univariate ANOVAs were used to test whether each clinical variable differed across the four clusters.
+- For each variable, Outcome ~ Cluster was fit using a standard one‑way ANOVA.
+
+2. Variables tested
+
+- The following variables were evaluated:
+  - Demographics
+    - Sex
+    - Age
+  - Genotype
+    - Number of F508del alleles
+  - Pulmonary function
+    - FEV1% predicted at TP1, TP2, TP3
+    - FVC% predicted at TP1, TP2, TP3
+    - Change in FEV1
+    - Change in FVC 
+  - Exacerbation severity
+    - PES at TP1, TP2, TP3
+    - Change in PES
+
+3. Assumptions
+
+- Levene’s test was used to confirm homogeneity of variance for each ANOVA.
+- All variables met assumptions sufficiently for ANOVA to be applied.
+
+4. Multiple testing correction
+- All unadjusted p‑values were stored in a results table.
+- False Discovery Rate (FDR) correction was applied across all tests.
+
+
+## Post-hoc Clinical Analysis
+
+Overview: After identifying several clinical variables with significant or near‑significant differences across the four flag‑mean clusters, additional analyses were conducted to (1) assess the impact of missing data, (2) verify ANOVA assumptions, and (3) perform post‑hoc pairwise comparisons.
+
+#### Missing Data Assessment
+
+1. Extent of missingness
+
+- For pulmonary function and exacerbation variables at later time points (TP2 and TP3), the number of missing observations was quantified. Across all subjects:
+  - 3–4 values were missing for FEV1 and FVC change scores.
+  - 1–3 values were missing for raw FEV1/FVC at TP1–TP3.
+- Missingness was modest and did not differ dramatically across variables.
+
+2. Missingness by cluster
+
+- To determine whether missing data were unevenly distributed across clusters, missingness was tabulated separately for each group.Patterns showed:
+  - Groups 1 and 3 had no missing values for the key change variables.
+  - Groups 2 and 4 had some missingness (12–30%), but sample sizes were small.
+  
+3. Testing whether missingness differed by cluster
+
+- Contingency tables of missing vs. non‑missing by cluster were evaluated using Fisher’s exact test (appropriate for small cell counts).
+- No significant differences were found, indicating that missingness was not systematically associated with cluster membership.
+
+4. Sensitivity analysis excluding missing observations
+
+- To confirm that missing data were not driving the observed ANOVA results:
+  - Rows containing missing values for the most significant variables (e.g., FEV1 TP1→TP3, FVC TP1→TP3) were removed.
+  - ANOVAs were re‑run on the reduced dataset.
+- The significance pattern remained similar, supporting the robustness of the findings
+
+#### Verification of ANOVA Assumptions
+
+1. Homogeneity of variance
+
+- Levene’s tests were performed for each of the key pulmonary function change variables (change in FEV1 and FVC)
+- All tests yielded p > 0.05, indicating no evidence of unequal variances across clusters.
+- Thus, standard ANOVA and Tukey HSD post‑hoc tests were appropriate.
+
+
+#### Post‑hoc Pairwise Comparisons
+
+1. Tukey HSD tests
+
+- For each significant or near‑significant ANOVA result, Tukey HSD was used to identify which clusters differed.
+
+
+
+
+## Immune Protein Analysis
+
+1. Identification of immune‑related proteins
+
+- Proteomic identifiers were mapped to UniProt entries.
+- A subset of proteins annotated with immune‑related biological processes was selected for exploratory testing:
+  - LRIT2
+  - LIRA5
+  - CLM7
+  - Eotaxin‑2
+  - TLR4
+  - TLR4/MD‑2 complex
+  
+2. Univariate ANOVAs
+
+- Each immune‑related protein was tested for differences across the four clusters using one‑way ANOVA with FDR correction.
+  - No proteins reached significance after FDR adjustment.
+
+
+## Cluster Summary 
+
+Overview: To characterize the four flag‑mean clusters and evaluate whether they differed in demographic, clinical, microbiome, or proteomic features, a series of descriptive and inferential analyses were performed. These included construction of a cluster‑level summary table, univariate ANOVAs for all microbial taxa and proteins, and visualization of significant features. To evaluate how the final flag‑mean clusters related to the clusters obtained from individual omics layers (proteomics and microbiome), cross‑classification tables and alluvial diagrams were constructed. These visualizations quantify the degree of agreement between clustering approaches and illustrate how subjects transition between cluster assignments across methods.
+
+#### Cluster Level Summary table
+
+1. Summary statistics by cluster
+
+- For each of the four clusters, the following were computed:
+  - Number of subjects
+  - Mean age
+  - Percent male
+  - Distribution of CFTR F508del genotypes (0, 1, or 2 alleles)
+  - Mean PES change (TP2–TP1, TP3–TP1)
+  - Mean FEV1 change (TP2–TP1, TP3–TP1)
+  - Mean FVC change (TP2–TP1, TP3–TP1)
+- Missing values were excluded on a per‑variable basis.
+
+#### Univariate Associations With Microbiome and Proteomic Features
+
+1. Microbiome feature testing
+
+- Each CLR‑transformed bacterial taxon at Time Point 1 was tested for differences across the four clusters using one‑way ANOVA of Abundance ~ Cluster.
+- False Discovery Rate (FDR) correction was applied across all taxa and all proteins jointly to control for the large number of tests.
+  - Two taxa remained significant after FDR correction: Granulicatella and Lachnoanaerobaculum
+
+2. Proteomic feature testing
+
+- Each log2‑transformed protein abundance at Time Point 1 was similarly tested.
+- After FDR correction, one protein remained significant: FTMT (Ferritin mitochondrial)
+  - This protein was identified via UniProt mapping as Q8N4E7.
+
+3. Visualization 
+
+- For the significant taxa and protein, boxplots were generated showing abundance distributions across clusters. CLR abundance for bacteria and log2 RFU for proteins were used and were faceted to allow direct comparison of cluster‑level differences.
+- To contextualize the significant findings, several clinically relevant bacteria and inflammatory proteins were also visualized across clusters:
+  - Bacteria: Pseudomonas, Staphylococcus, Streptococcus
+  - Proteins: Elastase, IL‑6, IL‑8
+
+4. Ranking of Microbial Associations
+
+- To identify the most cluster‑informative taxa, all bacterial ANOVA p‑values were sorted, and the top 15 taxa were listed.
+
+#### Cross-Comparison of Cluster Assignments
+
+1. Construction of contingency tables
+
+- For each subject, three cluster labels were available: 
+  - Integrated cluster (flag‑mean)
+  - Proteomic cluster (PT)
+  - Microbiome cluster (MB)
+- Contingency tables were created:
+  - Integrated cluster x PT cluster
+  - Integrated cluster x MB cluster
+  - Integrated cluster x PT cluster x MB cluster
+- Each cell contained the number of subjects assigned to the corresponding pair of clusters and visualized with Alluvial diagrams
+
+2. Multi‑Resolution Cluster Stability 
+
+- To explore the stability of subject groupings across different numbers of clusters (2–6), alluvial diagrams were constructed using cluster assignments from multiple resolutions. 
+
+
+
+# Previous code:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
