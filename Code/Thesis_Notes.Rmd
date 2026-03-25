@@ -284,9 +284,6 @@ Overview: After identifying several clinical variables with significant or near�
 
 - For each significant or near‑significant ANOVA result, Tukey HSD was used to identify which clusters differed.
 
-
-
-
 ## Immune Protein Analysis
 
 1. Identification of immune‑related proteins
@@ -304,7 +301,6 @@ Overview: After identifying several clinical variables with significant or near�
 
 - Each immune‑related protein was tested for differences across the four clusters using one‑way ANOVA with FDR correction.
   - No proteins reached significance after FDR adjustment.
-
 
 ## Cluster Summary 
 
@@ -366,6 +362,330 @@ Overview: To characterize the four flag‑mean clusters and evaluate whether the
 2. Multi‑Resolution Cluster Stability 
 
 - To explore the stability of subject groupings across different numbers of clusters (2–6), alluvial diagrams were constructed using cluster assignments from multiple resolutions. 
+
+
+
+
+# Drafted Methods and Results Section
+
+## Methods
+
+All analyses were conducted in R v4.5.2 (2025-10-31 ucrt). 
+
+#### Data Processing
+
+Microbiome and proteomic measurements were processed separately at each of the three study timepoints, though time point 1 was the focus of the analyses. For the microbiome data, subjects were retained only if they had more than one sequencing record without missing counts. Taxa were reained if there was a minimum relative abundance of 0.1\% in at least one subject and presence in at least 10\% of subjects at the appropriate timepoint. A centered log-ratio (CLR) transformation was applied and outlier subjects were identified with principal components. There were two outliers across all time points that were removed. A log2 transformation was applied to the proteomic data, and proteins with at least 20\% missingness were excluded. The final sample size for time point 1 was ___ taxa and ___ proteins, from an initial sample size of ___ and ___, respectively. 31 subjects were retained for the time point 1 analysis. 
+
+#### Clustering
+
+To characterize the shared structure across the two omics views at time point 1, we applied a clustering approach based on graph Laplacians and the flag manifold \cite{Charlie MMOC}. For each dataset, a similarity graph was constructed using a Spectrum CNN kernel, and a shifted graph Laplacian was computed. Eigen-decomposition of each Laplacian yielded low-dimensional spectral embeddings representing cluster-informative subspaces. 
+
+The microbiome and proteomic subspaces were combined using the flag mean. The flag mean allows for multi-view clustering while maintaining a different number of features or clusters across views. The optimal number of clusters in the joint embedding was estimated to be 4 using the traceW index, the maximum value of absolute second differences between levels of the index \cite{Milligan and Cooper 1985}. Subjects were assigned to clusters using k-means applied to the first four dimensions of the flag-mean embedding. 
+
+Individual omiv view clusterings were also generated for exploratory comparison using Gaussian mixture modeling (microbiome) and k-means (proteomics), but these were not used for the final integrated clustering. Exploratory rank-k Laplacian approximations were computed but not used in the final analysis. 
+
+To compare clustering, contingency tables were constructed for microbiome-only, proteomics-only, and integrated cluster assignments and visualized with alluvial diagrams. Additional alluvial diagrams were generated to examine cluster stability across multiple cluster assignments (2-6 clusters). 
+
+To identify biological features associated with cluster structure, univariate ANOVAs were performed for each transformed bacterial taxa and protein, with FDR correction applied. A subset of immune-related proteins identified via UniProt annotation was also tested. Visualization of significant and clinically relevant features was performed using boxplors, including that of a predefined subset of clinically relevant taxa and proteins that were not statistically significant. 
+
+#### Clinical Data Integration
+
+Demographic variables, CFTR genotype, pulmonary function (percent predicted FEV1 and FVC), and Pulmonary Exacerbation Score (PES) were merged with cluster assignments using subject identifiers. Derived variables included changes in FEV1, FVC, and PES across the three time points and recoding genotype as the number of F508del alleles. 
+
+Differences in clinical characteristics across clusters were assessed using univariate ANOVAs. Homogeneity of variance was evaluated using Levene's test. Benjamini-Hochberg False Discovery Rate (FDR) correction was applied across all tests. Missingness was quantified overall and by cluster, and Fisher's exact tests were used to assess whether missing data were differentially distributed. Sensitivity analyses were performed by repeating ANOVAs after excluding subjects with missing values for key variables. 
+
+
+
+
+# Adjusted with new distance matrix from Brandie: 
+
+
+```{r}
+micro <- read.csv(here::here("DataProcessed", "micro_wide.csv"), header = T)
+soma <- read.csv(here::here("DataProcessed", "soma_wide.csv"), header = T)
+dat_clin <- read.csv(here::here("DataRaw", "CF_pex_clinical.txt"))
+
+library(vegan)
+b <- vegdist(micro, method="hellinger")
+c <- vegdist(soma, method="hellinger")
+#c <- c / max(c)
+  # converts to 0/1 so the same scale as horn
+```
+
+Individual Clustering
+```{r}
+# rownames(dat_mb_T1) <- dat_mb_T1$sid
+# rownames(dat_pt_T1) <- dat_pt_T1$sid
+# dat_mb_T1 <- dat_mb_T1[, !(names(dat_mb_T1) %in% c("X", "sid"))]
+# dat_pt_T1 <- dat_pt_T1[, !(names(dat_pt_T1) %in% c("X", "sid"))]
+gaussLaplac <- function(dat, kernel='input',
+                        lap.type = 'sym',
+                        grf.type = 'full', k=5, p=5,
+                        epsilon=0, mutual=FALSE, 
+                        binary.grf=FALSE,
+                        plots=TRUE, verbose=TRUE){
+  
+  # if(kernel == 'Gaussian' & is.null(rho)) rho <- median(dist(dat))
+  if(kernel == 'Gaussian') A <- Gaussian_kernel(dat, rho = rho)
+  if(kernel == 'input') A <- data.matrix(dat)
+  if(kernel == 'Zhang') A <- Zhang_kernel(dat, p)
+  if(kernel == 'Spectrum'){
+    dtd <- as.data.frame( t(dat) )
+    A <- Spectrum::CNN_kernel(dtd)
+  }
+  
+  if(kernel == 'Linear') A <- dat%*%t(dat)
+  if(kernel == 'Cor') A <- cor(t(dat))
+  
+  diag(A) <- 0 ## Adjacency matrices need diag of 0
+  
+  if(verbose){
+    message(paste('Distances calculated with', kernel, 'kernel.'))
+    message("Summary of parwise distances:")
+    print(summary(A[lower.tri(A)]))
+  }
+  
+  if(grf.type == 'e-graph'){
+    A[A < epsilon] <- 0
+  }
+  
+  if(grf.type == 'knn'){
+    A <- knnGrf(A, k, mutual=mutual)
+  }
+  
+  if(binary.grf) A[A >0] <- 1
+  
+  deg <- rowSums(A)
+  
+  if(lap.type == 'sym'){
+    ds <- ifelse(deg>0, 1/sqrt(deg), 0)
+    # L = I - D^(-1/2) A D^(-1/2)
+    L <- diag(nrow = nrow(A)) - diag(ds) %*% A %*% diag(ds)
+  }
+  
+  ## 'Shifted' Laplacian
+  if(lap.type == "shift"){
+    ds <- ifelse(deg>0, 1/sqrt(deg), 0)
+    # L = I + D^(-1/2) A D^(-1/2)
+    L <- diag(nrow = nrow(A)) + diag(ds) %*% A %*% diag(ds)
+  }
+  
+  ## Laplacian used by Ng (2002) 'On Spectral Clustering'
+  if(lap.type == "Ng"){
+    ds <- ifelse(deg>0, 1/sqrt(deg), 0)
+    # L = D^(-1/2) A D^(-1/2)
+    L <- diag(ds) %*% A %*% diag(ds)
+  }
+  
+  ## Random walk Laplacian (best one)
+  if(lap.type == 'rw'){
+    ds <- ifelse(deg>0, 1/deg, 0)
+    # L = I - D^-1 A
+    L <- diag(nrow = nrow(A)) - diag(ds) %*% A
+  } 
+  
+  if(plots){
+    gg <- igraph::graph_from_adjacency_matrix(A,
+                                              mode='undirected',
+                                              weighted = TRUE)
+    # plot(gg, layout=igraph::layout_with_kk,
+    #      vertex.color='darkorchid1',
+    #      vertex.label=NA)
+    
+    stats::heatmap(A, symm=TRUE, 
+                   main = "Heatmap of Adjacency Matrix")
+    
+    plot(eigen(L)$values, col='dodgerblue3', pch=20, type="b",
+         ylab="Eigen values", main = "Eigen values of the Laplacian")
+  }
+  
+  L
+}
+
+mb_LapSft <- gaussLaplac(b, lap.type = 'rw', 
+                         kernel = "input")
+  #Microbiome Eigenvalues of graph Laplacian and Heatmap of Adjacency Matrix for T1 
+prot_LapSft <- gaussLaplac(c, lap.type = 'rw',
+                        kernel = "input")
+  #Proteomics Eigenvalues of graph Laplacian and Heatmap of Adjacency Matrix for T1 
+```
+
+Joint Clustering via Spectral Clustering and Flag Mean
+```{r}
+mb_eigSft <- eigen(mb_LapSft)
+prot_eigSft <- eigen(prot_LapSft)
+
+# Spectral Clustering -----------------------------------------------------
+
+mb_vecs <- mb_eigSft$vectors
+
+mb_for_nb <- mb_vecs[, 1:5]   
+  # first 5 eigenvectors
+NbClust(mb_for_nb, diss = b, distance = NULL, method = "kmeans", index = "alllong")
+  # TraceW gives 3
+mk <- 6
+mbInd <- 1:mk
+mbv <- mb_vecs[,mbInd]
+mbGMM <- GMM(mbv, mk, dist_mode = 'eucl_dist', em_iter = 15)
+mbClust <- predict(mbGMM, newdata = mbv)
+
+prot_vecs <- prot_eigSft$vectors
+prot_for_nb <- prot_vecs[, 1:5]
+NbClust(prot_for_nb, diss = c, distance = NULL, method = "kmeans", index = "alllong")
+  # TraceW gives 5
+pk <- 6
+protInd <- 1:pk
+pev <- prot_eigSft$vectors[,protInd] 
+set.seed(10)
+protClust <- kmeans(pev, pk, nstart=5)$cluster
+
+# Flag Mean ----------------------------------------------------------------
+
+Up <- prot_eigSft$vectors[, protInd]
+Um <- mb_eigSft$vectors[,mbInd]
+
+flm <- flmSym <- flagMean(list(Up, Um), plots = FALSE)
+flm.vecs <- flm$u
+
+NbClust(flm.vecs, method = 'kmeans', index='alllong')
+  # TraceW gives 3
+Fk <- 3
+set.seed(235)
+flgClust <- kmeans(flm.vecs[,1:4], centers = Fk, nstart = 10)$cluster
+
+flm.vecs %>% as.data.frame %>% 
+  mutate(clust = factor(flgClust)) %>% 
+  plot_ly(x = ~V2, y = ~V3, z = ~V4, 
+          color = ~clust, colors='Set1') %>%
+  add_markers()
+```
+
+```{r warning=FALSE}
+dat_cluster <- as.data.frame(cbind(sid = rownames(dat_mb_T1), joint = flgClust, mb = mbClust, pt = protClust))
+
+freqDF <- as.data.frame(xtabs(~ joint + mb + pt, data = dat_cluster))
+
+ggplot(
+  freqDF,
+  aes(
+    axis1 = mb,
+    axis2 = pt,
+    y = Freq
+  )
+) +
+  geom_alluvium(aes(fill = joint), alpha = 0.8) +
+  geom_stratum() +
+  geom_text(stat = "stratum", aes(label = after_stat(stratum))) +
+  scale_x_discrete(
+    limits = c("mb", "pt"),
+    expand = c(.1, .1)
+  ) +
+  theme_minimal()
+```
+
+```{r warning=FALSE}
+### 0. Helper function ------------------------------------------------------
+
+get_spec <- function(mat, k){
+  eig <- eigen(mat)
+  eig$vectors[, 1:k, drop = FALSE]
+}
+
+### 1. Laplacians -----------------------------------------------------------
+
+mb_LapSft   <- gaussLaplac(dat_mb_T1,  lap.type = "shift", kernel = "Spectrum", plots = FALSE)
+prot_LapSft <- gaussLaplac(dat_pt_T1,  lap.type = "shift", kernel = "Spectrum", plots = FALSE)
+
+### 2. Eigenvectors ---------------------------------------------------------
+
+mb_eig   <- eigen(mb_LapSft)
+prot_eig <- eigen(prot_LapSft)
+
+### 3. Choose mk and pk -----------------------------------------------------
+
+mk <- 2   # microbiome clusters
+pk <- 2   # proteomics clusters
+
+Um <- get_spec(mb_LapSft,   mk)   # microbiome eigenvectors
+Up <- get_spec(prot_LapSft, pk)   # proteomics eigenvectors
+
+### 4. Individual clustering ------------------------------------------------
+
+# Microbiome (GMM)
+mbClust <- predict(
+  GMM(Um, mk, dist_mode = "eucl_dist", em_iter = 15),
+  newdata = Um
+)
+
+# Proteomics (k-means)
+set.seed(10)
+protClust <- kmeans(Up, centers = pk, nstart = 5)$cluster
+
+### 5. Rank-k Laplacian approximations -------------------------------------
+
+mb_apx   <- LapSig(mb_LapSft,   mk, lap.type = "shift")
+prot_apx <- LapSig(prot_LapSft, pk, lap.type = "shift")
+
+apxLSft <- (mb_apx + prot_apx) / 2
+
+### 6. Joint spectral embedding --------------------------------------------
+
+apx_eig <- eigen(apxLSft)
+apxV    <- apx_eig$vectors[, 1:(mk + pk), drop = FALSE]
+
+### 7. Flag mean embedding --------------------------------------------------
+
+flm <- flagMean(list(Up, Um), plots = FALSE)
+flm_vecs <- flm$u
+
+### 8. Multi-k clustering for alluvial plot --------------------------------
+
+clusters <- sapply(2:6, function(K){
+  set.seed(4)
+  kmeans(flm_vecs[, 1:4], centers = K, nstart = 10)$cluster
+})
+
+clusters <- as.data.frame(clusters)
+names(clusters) <- paste0("C", 2:6)
+clusters$dummy <- 1
+
+freqDF <- as.data.frame(
+  ftable(xtabs(~ C6 + C5 + C4 + C3 + C2 + dummy, data = clusters))
+)
+
+### 9. Alluvial plots -------------------------------------------------------
+
+ggplot(freqDF,
+       aes(axis1 = C2, axis2 = C3, axis3 = C4, axis4 = C5, y = Freq)) +
+  geom_alluvium(aes(fill = C6)) +
+  geom_stratum() +
+  geom_text(stat = "stratum", aes(label = after_stat(stratum))) +
+  theme_minimal()
+
+ggplot(freqDF,
+       aes(axis1 = C3, axis2 = C4, axis3 = C5, axis4 = C6, y = Freq)) +
+  geom_alluvium(aes(fill = C2)) +
+  geom_stratum() +
+  geom_text(stat = "stratum", aes(label = after_stat(stratum))) +
+  theme_minimal()
+```
+```{r}
+sig_bac_prot <- data.frame(cbind(flgClust, dat_pt_T1$Elastase, dat_pt_T1$IL.6, dat_pt_T1$IL.8, dat_pt_T1$IL.1b, dat_pt_T1$MMP.2, dat_pt_T1$MMP.9, dat_pt_T1$SLPI, dat_pt_T1$TIMP.1, dat_pt_T1$TNF.a, dat_pt_T1$CRP, dat_pt_T1$calgranulin.B, dat_pt_T1$HMG.1, dat_pt_T1$IFN.g))
+colnames(sig_bac_prot) <- c("Group", "Elastase", "IL-6", "IL-8", "IL-1b", "MMP-2", "MMP-9", "SLPI", "TIMP-1", "TNF-a", "CRP", "calgranulin B", "HMG-1", "IFN-g")
+df.m <- melt(sig_bac_prot, id.var = "Group")
+
+p <- ggplot(data = df.m, aes(x=variable, y=value)) + 
+             geom_boxplot(aes(fill=factor(Group)))
+p <- p + xlab("Protein") + ylab("log2(RFU)") + ggtitle("Difference in Clinically Relevant Protein Amounts by Group")
+p <- p + guides(fill=guide_legend(title="Cluster"))
+p + facet_wrap( ~ variable, scales="free")
+```
+
+
+
+
+
+
 
 
 
@@ -1082,7 +1402,7 @@ microbiome_raw <- read.table(here::here("Data", "RawData_Seq_Micro.txt"), header
 proteomic_raw <- read.table(here::here("Data", "RawData_Soma_Prot.txt"), header = T, sep = ',')
 
 # Cleaned Data --------------------------------------------------------------
-mb_T1 <- read.csv(here::here("Data", "CF_clean_T1_micro.csv"))
+mb_T1 <- read.csv(here::here("DataProcessed", "CF_clean_T1_micro.csv"))
 sid_1 <- c(26,27,28,30,33,35,37,38,39,41,42,44,46,48,50,51,52,53,57,59,61,62,63,64,66,67,68,69,70,72,74)
 rownames(mb_T1) <- sid_1
 mb_T1 <- subset(mb_T1, select = -c(X))
@@ -1090,7 +1410,7 @@ mb_T1 <- subset(mb_T1, select = -c(X))
 mb_T2 <- read.csv(here::here("Data", "CF_clean_T2_micro.csv"))
 mb_T3 <- read.csv(here::here("Data", "CF_clean_T3_micro.csv"))
 
-pt_T1 <- read.csv(here::here("Data", "CF_clean_T1_prot.csv"))
+pt_T1 <- read.csv(here::here("DataProcessed", "CF_clean_T1_prot.csv"))
 rownames(pt_T1) <- sid_1
 pt_T1 <- subset(pt_T1, select = -c(X))
 
