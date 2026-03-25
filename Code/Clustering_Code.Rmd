@@ -1,0 +1,249 @@
+---
+title: "Clustering_Code"
+output: html_document
+date: "2026-03-17"
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+`%nin%` <- Negate(`%in%`)
+library(tidyverse); library(magrittr); library(plotly)
+library(compositions); library(VIM); library(dplyr)
+library(MAI); library(ClusterR); library(RVA)
+library(ggrepel); library(NbClust); library(sva)
+library(ggplot2); library(ggalluvial); library(reshape2)
+
+source(here::here("Code", "Simulation_Functions.R"))
+# source(here::here("Code", "CleanAllTimePoints_Ezra.R"))
+# 
+# dat_mb_T1 <- read.csv(here::here("DataProcessed", "CF_clean_T1_mb.csv"))
+# dat_pt_T1 <- read.csv(here::here("DataProcessed", "CF_clean_T1_pt.csv"))
+dat_clin <- read.csv(here::here("DataRaw", "CF_pex_clinical.txt"))
+```
+
+Data Cleaning with updated datasets
+```{r}
+dat_mb <- read.csv(here::here("DataProcessed", "micro.csv"), header = TRUE)
+dat_pt <- read.csv(here::here("DataProcessed", "soma.csv"), header = TRUE)
+
+## Microbiome ------------------------------------------------------------------
+
+dat_mb_wide <- dat_mb %>%
+  dplyr::select(sid, taxa, seq_count) %>%
+  tidyr::pivot_wider(
+    names_from = taxa,
+    values_from = seq_count,
+    values_fn = max
+  ) # Convert to wide
+
+tots_new <- rowSums(dat_mb_wide[,-1])
+  # Sequencing depth
+
+dat_mb_clr <- sweep(dat_mb_wide[,-1], 1, 1/tots_new, "+") %>%
+  apply(1, clr) %>%
+  t() # CLR transform with pseudocount
+
+dat_mb_T1 <- data.frame(cbind(sid = dat_mb_wide$sid, dat_mb_clr))
+  # Add sid back
+
+## Proteomics ------------------------------------------------------------------
+
+dat_pt_wide <- dat_pt %>%
+  dplyr::select(sid, Target, lmeas) %>%
+  tidyr::pivot_wider(
+    names_from = Target,
+    values_from = lmeas,
+    values_fn = max
+  ) # Convert to wide
+
+batch <- floor((dat_pt_wide$sid - 1) / 25) + 1
+  # Create batch variable
+
+prot_mat <- t(dat_pt_wide[,-1])
+  # Adjust format
+
+prot_corrected <- ComBat(
+  dat = prot_mat,
+  batch = batch,
+  par.prior = TRUE,
+  prior.plots = FALSE
+) # Batch correction
+
+prot_corrected <- t(prot_corrected)
+  # Return to original format
+
+dat_pt_T1 <- data.frame(sid = dat_pt_wide$sid, prot_corrected)
+  # Add sid back
+
+# write.csv(dat_mb_T1, here::here("DataProcessed", "micro_wide_Ezra.csv"))
+# write.csv(dat_pt_T1, here::here("DataProcessed", "soma_wide_Ezra.csv"))
+```
+
+
+Individual Clustering
+```{r}
+rownames(dat_mb_T1) <- dat_mb_T1$sid
+rownames(dat_pt_T1) <- dat_pt_T1$sid
+dat_mb_T1 <- dat_mb_T1[, !(names(dat_mb_T1) %in% c("X", "sid"))]
+dat_pt_T1 <- dat_pt_T1[, !(names(dat_pt_T1) %in% c("X", "sid"))]
+
+mb_LapSft <- gaussLaplac(dat_mb_T1, lap.type = 'shift', 
+                         kernel = "Spectrum")
+  #Microbiome Eigenvalues of graph Laplacian and Heatmap of Adjacency Matrix for T1 
+prot_LapSft <- gaussLaplac(dat_pt_T1, lap.type = 'shift',
+                        kernel = "Spectrum")
+  #Proteomics Eigenvalues of graph Laplacian and Heatmap of Adjacency Matrix for T1 
+```
+
+Joint Clustering via Spectral Clustering and Flag Mean
+```{r}
+mb_eigSft <- eigen(mb_LapSft)
+prot_eigSft <- eigen(prot_LapSft)
+
+# Spectral Clustering -----------------------------------------------------
+
+mb_vecs <- mb_eigSft$vectors
+
+mb_for_nb <- mb_vecs[, 1:5]   
+  # first 5 eigenvectors
+NbClust(mb_for_nb, distance = "euclidean", method = "kmeans", index = "alllong")
+  # TraceW gives 4, TrCovW gives 3
+mk <- 4
+mbInd <- 1:mk
+mbv <- mb_vecs[,mbInd]
+mbGMM <- GMM(mbv, mk, dist_mode = 'eucl_dist', em_iter = 15)
+mbClust <- predict(mbGMM, newdata = mbv)
+
+prot_vecs <- prot_eigSft$vectors
+prot_for_nb <- prot_vecs[, 1:5]
+NbClust(prot_for_nb, distance = "euclidean", method = "kmeans", index = "alllong")
+  # TraceW gives 5, TrCovW gives 3
+pk <- 5
+protInd <- 1:pk
+pev <- prot_eigSft$vectors[,protInd] 
+set.seed(10)
+protClust <- kmeans(pev, pk, nstart=5)$cluster
+
+# Flag Mean ----------------------------------------------------------------
+
+Up <- prot_eigSft$vectors[, protInd]
+Um <- mb_eigSft$vectors[,mbInd]
+
+flm <- flmSym <- flagMean(list(Up, Um), plots = FALSE)
+flm.vecs <- flm$u
+
+NbClust(flm.vecs, method = 'kmeans', index='alllong')
+  # TraceW gives 5, TrCovW gives 3
+Fk <- 5
+set.seed(235)
+flgClust <- kmeans(flm.vecs[,1:4], centers = Fk, nstart = 10)$cluster
+
+flm.vecs %>% as.data.frame %>% 
+  mutate(clust = factor(flgClust)) %>% 
+  plot_ly(x = ~V2, y = ~V3, z = ~V4, 
+          color = ~clust, colors='Set1') %>%
+  add_markers()
+```
+
+```{r warning=FALSE}
+dat_cluster <- as.data.frame(cbind(sid = rownames(dat_mb_T1), joint = flgClust, mb = mbClust, pt = protClust))
+
+freqDF <- as.data.frame(xtabs(~ joint + mb + pt, data = dat_cluster))
+
+ggplot(
+  freqDF,
+  aes(
+    axis1 = mb,
+    axis2 = pt,
+    y = Freq
+  )
+) +
+  geom_alluvium(aes(fill = joint), alpha = 0.8) +
+  geom_stratum() +
+  geom_text(stat = "stratum", aes(label = after_stat(stratum))) +
+  scale_x_discrete(
+    limits = c("mb", "pt"),
+    expand = c(.1, .1)
+  ) +
+  theme_minimal()
+```
+
+```{r warning=FALSE}
+clusters <- sapply(2:6, function(K){
+  set.seed(4)
+  kmeans(flm.vecs[, 1:4], centers = K, nstart = 10)$cluster
+})
+
+clusters <- as.data.frame(clusters)
+names(clusters) <- paste0("C", 2:6)
+clusters$dummy <- 1
+
+freqDF <- as.data.frame(
+  ftable(xtabs(~ C6 + C5 + C4 + C3 + C2 + dummy, data = clusters))
+)
+
+ggplot(freqDF,
+       aes(axis1 = C2, axis2 = C3, axis3 = C4, axis4 = C5, y = Freq)) +
+  geom_alluvium(aes(fill = C6)) +
+  geom_stratum() +
+  geom_text(stat = "stratum", aes(label = after_stat(stratum))) +
+  theme_minimal()
+
+ggplot(freqDF,
+       aes(axis1 = C3, axis2 = C4, axis3 = C5, axis4 = C6, y = Freq)) +
+  geom_alluvium(aes(fill = C2)) +
+  geom_stratum() +
+  geom_text(stat = "stratum", aes(label = after_stat(stratum))) +
+  theme_minimal()
+```
+```{r}
+sig_bac_prot <- data.frame(cbind(flgClust, dat_pt_T1$Elastase, dat_pt_T1$IL.6, dat_pt_T1$IL.8, dat_pt_T1$IL.1b, dat_pt_T1$MMP.2, dat_pt_T1$MMP.9, dat_pt_T1$SLPI, dat_pt_T1$TIMP.1, dat_pt_T1$TNF.a, dat_pt_T1$CRP, dat_pt_T1$calgranulin.B, dat_pt_T1$HMG.1, dat_pt_T1$IFN.g))
+colnames(sig_bac_prot) <- c("Group", "Elastase", "IL-6", "IL-8", "IL-1b", "MMP-2", "MMP-9", "SLPI", "TIMP-1", "TNF-a", "CRP", "calgranulin B", "HMG-1", "IFN-g")
+df.m <- melt(sig_bac_prot, id.var = "Group")
+
+p <- ggplot(data = df.m, aes(x=variable, y=value)) + 
+             geom_boxplot(aes(fill=factor(Group)))
+p <- p + xlab("Protein") + ylab("log2(RFU)") + ggtitle("Difference in Clinically Relevant Protein Amounts by Group")
+p <- p + guides(fill=guide_legend(title="Cluster"))
+p + facet_wrap( ~ variable, scales="free")
+```
+
+```{r}
+tots <- rowSums(dat_mb_wide[,-1], na.rm = TRUE)
+  # Sequencing depth
+dat_mb_ra <- sweep(dat_mb_wide[,-1], 1, tots, FUN = "/")
+  # Relative abundance matrix
+dat_mb_ra <- data.frame(sid = dat_mb_wide$sid, cluster = flgClust, dat_mb_ra)
+  # Add sid and group
+mean_ra <- colMeans(dat_mb_ra[, !(names(dat_mb_ra) %in% c("sid", "cluster"))], 
+                    na.rm = TRUE)  
+  # Compute mean ra for each taxa
+top10_taxa <- names(sort(mean_ra, decreasing = TRUE))[1:10]
+  # Top 10 taxa
+
+taxa_rank <- sort(mean_ra, decreasing = TRUE)
+  # Rank all taxa
+pseudomonas_rank <- which(names(taxa_rank) == "Pseudomonas")
+  # Rank of pseudomonas (only one of big 3 not in top 10)
+top10_plus_pseudo <- unique(c(top10_taxa, "Pseudomonas"))
+  # Add pseudomonas
+
+dat_top10_long <- dat_mb_ra %>%
+  dplyr::select(sid, cluster, all_of(top10_plus_pseudo)) %>%
+  melt(id.vars = c("sid", "cluster"),
+       variable.name = "taxa",
+       value.name = "rel_abundance")
+  # Convert to long for plotting
+p <- ggplot(dat_top10_long, aes(x = taxa, y = rel_abundance)) +
+  geom_boxplot(aes(fill = factor(cluster))) +
+  xlab("Bacterial Taxa") +
+  ylab("Relative Abundance") +
+  ggtitle("Top 10 Most Abundant Bacteria by Group + Pseudomonas (Rank 18)") +
+  guides(fill = guide_legend(title = "Cluster")) +
+  facet_wrap(~ taxa, scales = "free")
+p
+```
+
+
