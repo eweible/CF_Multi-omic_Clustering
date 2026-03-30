@@ -3,7 +3,7 @@ title: "Clustering_Code"
 output: html_document
 date: "2026-03-17"
 editor_options: 
-  chunk_output_type: inline
+  chunk_output_type: console
 ---
 
 ```{r setup, include=FALSE}
@@ -187,24 +187,38 @@ flm.vecs %>% as.data.frame %>%
 ```
 
 ```{r warning=FALSE}
-dat_cluster <- as.data.frame(cbind(sid = rownames(dat_mb_T1), joint = flgClust, mb = mbClust, pt = protClust))
+dat_cluster <- data.frame(sid = rownames(dat_mb_T1), 
+                          joint = flgClust, mb = mbClust, pt = protClust,
+                          stringsAsFactors = FALSE)
 
-freqDF <- as.data.frame(xtabs(~ joint + mb + pt, data = dat_cluster))
+freqDF <- as.data.frame(
+  xtabs(~ joint + mb + pt,
+        data = dat_cluster)
+  ) %>%
+  rename(
+    `Joint Clusters` = joint,
+    `Microbiome Clusters` = mb,
+    `Proteomics Clusters` = pt
+  )
 
 ggplot(
   freqDF,
   aes(
-    axis1 = mb,
-    axis2 = pt,
+    axis1 = `Microbiome Clusters`,
+    axis2 = `Proteomics Clusters`,
     y = Freq
   )
 ) +
-  geom_alluvium(aes(fill = joint), alpha = 0.8) +
+  geom_alluvium(aes(fill = `Joint Clusters`), alpha = 0.8) +
   geom_stratum() +
   geom_text(stat = "stratum", aes(label = after_stat(stratum))) +
   scale_x_discrete(
-    limits = c("mb", "pt"),
+    limits = c("Microbiome Clusters", "Proteomics Clusters"),
     expand = c(.1, .1)
+  ) +
+  labs(
+    y = "Number of Individuals",
+    title = "Individual Cluster Comparison"
   ) +
   theme_minimal()
 ```
@@ -221,21 +235,45 @@ clusters$dummy <- 1
 
 freqDF <- as.data.frame(
   ftable(xtabs(~ C6 + C5 + C4 + C3 + C2 + dummy, data = clusters))
-)
+  ) %>%
+  rename(
+    `2 Clusters` = C2,
+    `3 Clusters` = C3,
+    `4 Clusters` = C4,
+    `5 Clusters` = C5,
+    `6 Clusters` = C6
+  )
 
-ggplot(freqDF,
-       aes(axis1 = C2, axis2 = C3, axis3 = C4, axis4 = C5, y = Freq)) +
-  geom_alluvium(aes(fill = C6)) +
+ggplot(
+  freqDF,
+  aes(
+    axis1 = `2 Clusters`,
+    axis2 = `3 Clusters`,
+    axis3 = `4 Clusters`,
+    axis4 = `5 Clusters`,
+    y = Freq
+  )
+) +
+  geom_alluvium(aes(fill = `6 Clusters`), alpha = 0.8) +
   geom_stratum() +
   geom_text(stat = "stratum", aes(label = after_stat(stratum))) +
+  scale_x_discrete(
+    limits = c("2 Clusters", "3 Clusters", "4 Clusters", "5 Clusters"),
+    expand = c(.1, .1)
+  ) +
+  labs(
+    y = "Number of Individuals",
+    fill = "6 Clusters",
+    title = "Joint Cluster Comparison"
+  ) +
   theme_minimal()
 
-ggplot(freqDF,
-       aes(axis1 = C3, axis2 = C4, axis3 = C5, axis4 = C6, y = Freq)) +
-  geom_alluvium(aes(fill = C2)) +
-  geom_stratum() +
-  geom_text(stat = "stratum", aes(label = after_stat(stratum))) +
-  theme_minimal()
+# ggplot(freqDF,
+#        aes(axis1 = C3, axis2 = C4, axis3 = C5, axis4 = C6, y = Freq)) +
+#   geom_alluvium(aes(fill = C2)) +
+#   geom_stratum() +
+#   geom_text(stat = "stratum", aes(label = after_stat(stratum))) +
+#   theme_minimal()
 ```
 ```{r}
 sig_bac_prot <- data.frame(cbind(flgClust, dat_pt_T1$SOMA_1809, dat_pt_T1$SOMA_2100, dat_pt_T1$SOMA_2524, dat_pt_T1$SOMA_2331, dat_pt_T1$SOMA_2738, dat_pt_T1$SOMA_2102, dat_pt_T1$SOMA_2801, dat_pt_T1$SOMA_2067, dat_pt_T1$SOMA_3338, dat_pt_T1$SOMA_2789, #dat_pt_T1$SOMA_3119,
@@ -581,9 +619,9 @@ dat_table1 <- dat_clin %>%
 
 table1::table1(
   ~ Gender + `Age (years)` + `Number of F508del Alleles` +
-    `FEV1 % Predicted (TP1)` + `FEV1 % Predicted (TP2)` + `FEV1 % Predicted (TP3)` +
-    `FVC % Predicted (TP1)` + `FVC % Predicted (TP2)` + `FVC % Predicted (TP3)` +
-    `PES Total (TP1)` + `PES Total (TP2)` + `PES Total (TP3)`
+    `FEV1 % Predicted (TP1)` + #`FEV1 % Predicted (TP2)` + `FEV1 % Predicted (TP3)` +
+    `FVC % Predicted (TP1)` + #`FVC % Predicted (TP2)` + `FVC % Predicted (TP3)` +
+    `PES Total (TP1)` #+ `PES Total (TP2)` + `PES Total (TP3)`
   | joint,
   data = dat_table1
 )
