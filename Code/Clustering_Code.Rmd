@@ -20,7 +20,6 @@ source(here::here("Code", "Simulation_Functions.R"))
 # 
 # dat_mb_T1 <- read.csv(here::here("DataProcessed", "CF_clean_T1_mb.csv"))
 # dat_pt_T1 <- read.csv(here::here("DataProcessed", "CF_clean_T1_pt.csv"))
-dat_clin <- read.csv(here::here("DataRaw", "CF_pex_clinical.txt"))
 ```
 
 Data Cleaning with updated datasets
@@ -31,12 +30,21 @@ dat_pt <- read.csv(here::here("DataProcessed", "soma.csv"), header = TRUE)
 ## Microbiome ------------------------------------------------------------------
 
 dat_mb_wide <- dat_mb %>%
-  dplyr::select(sid, taxa, seq_count) %>%
+  dplyr::select(sid, OTU_Name, seq_count) %>%
   tidyr::pivot_wider(
-    names_from = taxa,
-    values_from = seq_count,
-    values_fn = max
+    names_from = OTU_Name,
+    values_from = seq_count#,
+    #values_fn = max
   ) # Convert to wide
+
+# > dim(dat_mb)
+# [1] 2263   46
+# > dim(dat_mb_wide)
+# [1] 31 74
+# > length(unique(dat_mb$sid))
+# [1] 31
+# > length(unique(dat_mb$OTU_Name))
+# [1] 73
 
 tots_new <- rowSums(dat_mb_wide[,-1])
   # Sequencing depth
@@ -45,18 +53,43 @@ dat_mb_clr <- sweep(dat_mb_wide[,-1], 1, 1/tots_new, "+") %>%
   apply(1, clr) %>%
   t() # CLR transform with pseudocount
 
-dat_mb_T1 <- data.frame(cbind(sid = dat_mb_wide$sid, dat_mb_clr))
+batch <- floor((dat_mb_wide$sid - 1) / 25) + 1
+  # Create batch variable
+
+mb_mat <- t(dat_mb_clr)
+  # Adjust format
+
+mb_corrected <- ComBat(
+  dat = mb_mat,
+  batch = batch,
+  par.prior = TRUE,
+  prior.plots = FALSE
+) # Batch correction
+
+mb_corrected <- t(mb_corrected)
+  # Return to original format
+
+dat_mb_T1 <- data.frame(cbind(sid = dat_mb_wide$sid, mb_corrected))
   # Add sid back
 
 ## Proteomics ------------------------------------------------------------------
 
 dat_pt_wide <- dat_pt %>%
-  dplyr::select(sid, Target, lmeas) %>%
+  dplyr::select(sid, somaid2, lmeas) %>%
   tidyr::pivot_wider(
-    names_from = Target,
-    values_from = lmeas,
-    values_fn = max
+    names_from = somaid2,
+    values_from = lmeas#,
+    #values_fn = max
   ) # Convert to wide
+
+# > dim(dat_pt)
+# [1] 120714     15
+# > dim(dat_pt_wide)
+# [1]   31 3895
+# > length(unique(dat_pt$sid))
+# [1] 31
+# > length(unique(dat_pt$somaid2))
+# [1] 3894
 
 batch <- floor((dat_pt_wide$sid - 1) / 25) + 1
   # Create batch variable
@@ -79,6 +112,11 @@ dat_pt_T1 <- data.frame(sid = dat_pt_wide$sid, prot_corrected)
 
 # write.csv(dat_mb_T1, here::here("DataProcessed", "micro_wide_Ezra.csv"))
 # write.csv(dat_pt_T1, here::here("DataProcessed", "soma_wide_Ezra.csv"))
+
+
+dat_clin <- read.csv(here::here("DataRaw", "CF_pex_clinical.txt"))
+dat_clin <- dat_clin %>%
+  filter(sid %in% dat_mb_T1$sid)
 ```
 
 
@@ -110,17 +148,18 @@ mb_for_nb <- mb_vecs[, 1:5]
   # first 5 eigenvectors
 NbClust(mb_for_nb, distance = "euclidean", method = "kmeans", index = "alllong")
   # TraceW gives 4, TrCovW gives 3
-mk <- 4
+mk <- 3
 mbInd <- 1:mk
 mbv <- mb_vecs[,mbInd]
 mbGMM <- GMM(mbv, mk, dist_mode = 'eucl_dist', em_iter = 15)
 mbClust <- predict(mbGMM, newdata = mbv)
+  # 4 4 4 4 2 4 4 4 4 2 2 4 3 1 1 3 1 1 1 3 1 1 2 3 3 1 3 1 2 3 3
 
 prot_vecs <- prot_eigSft$vectors
 prot_for_nb <- prot_vecs[, 1:5]
 NbClust(prot_for_nb, distance = "euclidean", method = "kmeans", index = "alllong")
-  # TraceW gives 5, TrCovW gives 3
-pk <- 5
+  # TraceW gives 6, TrCovW gives 3
+pk <- 3
 protInd <- 1:pk
 pev <- prot_eigSft$vectors[,protInd] 
 set.seed(10)
@@ -135,8 +174,8 @@ flm <- flmSym <- flagMean(list(Up, Um), plots = FALSE)
 flm.vecs <- flm$u
 
 NbClust(flm.vecs, method = 'kmeans', index='alllong')
-  # TraceW gives 5, TrCovW gives 3
-Fk <- 5
+  # If pt is 3: TraceW gives 4, TrCovW gives 4
+Fk <- 4
 set.seed(235)
 flgClust <- kmeans(flm.vecs[,1:4], centers = Fk, nstart = 10)$cluster
 
@@ -199,11 +238,13 @@ ggplot(freqDF,
   theme_minimal()
 ```
 ```{r}
-sig_bac_prot <- data.frame(cbind(flgClust, dat_pt_T1$Elastase, dat_pt_T1$IL.6, dat_pt_T1$IL.8, dat_pt_T1$IL.1b, dat_pt_T1$MMP.2, dat_pt_T1$MMP.9, dat_pt_T1$SLPI, dat_pt_T1$TIMP.1, dat_pt_T1$TNF.a, dat_pt_T1$CRP, dat_pt_T1$calgranulin.B, dat_pt_T1$HMG.1, dat_pt_T1$IFN.g))
-colnames(sig_bac_prot) <- c("Group", "Elastase", "IL-6", "IL-8", "IL-1b", "MMP-2", "MMP-9", "SLPI", "TIMP-1", "TNF-a", "CRP", "calgranulin B", "HMG-1", "IFN-g")
+sig_bac_prot <- data.frame(cbind(flgClust, dat_pt_T1$SOMA_1809, dat_pt_T1$SOMA_2100, dat_pt_T1$SOMA_2524, dat_pt_T1$SOMA_2331, dat_pt_T1$SOMA_2738, dat_pt_T1$SOMA_2102, dat_pt_T1$SOMA_2801, dat_pt_T1$SOMA_2067, dat_pt_T1$SOMA_3338, dat_pt_T1$SOMA_2789, #dat_pt_T1$SOMA_3119,
+                                 dat_pt_T1$SOMA_2095, dat_pt_T1$SOMA_1985))
+colnames(sig_bac_prot) <- c("Group", "Elastase", "IL-6", "IL-8", "IL-1b", "MMP-2", "MMP-9", "SLPI", "TIMP-1", "TNF-a", "CRP", #"calgranulin B",
+                            "HMG-1", "IFN-g")
 df.m <- melt(sig_bac_prot, id.var = "Group")
 
-p <- ggplot(data = df.m, aes(x=variable, y=value)) + 
+p <- ggplot(data = df.m, aes(x=variable, y=value)) +
              geom_boxplot(aes(fill=factor(Group)))
 p <- p + xlab("Protein") + ylab("log2(RFU)") + ggtitle("Difference in Clinically Relevant Protein Amounts by Group")
 p <- p + guides(fill=guide_legend(title="Cluster"))
@@ -220,30 +261,331 @@ dat_mb_ra <- data.frame(sid = dat_mb_wide$sid, cluster = flgClust, dat_mb_ra)
 mean_ra <- colMeans(dat_mb_ra[, !(names(dat_mb_ra) %in% c("sid", "cluster"))], 
                     na.rm = TRUE)  
   # Compute mean ra for each taxa
+
+### 1. Identify top 10 taxa
 top10_taxa <- names(sort(mean_ra, decreasing = TRUE))[1:10]
-  # Top 10 taxa
 
-taxa_rank <- sort(mean_ra, decreasing = TRUE)
-  # Rank all taxa
-pseudomonas_rank <- which(names(taxa_rank) == "Pseudomonas")
-  # Rank of pseudomonas (only one of big 3 not in top 10)
-top10_plus_pseudo <- unique(c(top10_taxa, "Pseudomonas"))
-  # Add pseudomonas
+### 2. Automatically detect the Pseudomonas column
+pseudomonas_full <- grep("Pseudomonas$", colnames(dat_mb_ra), value = TRUE)
 
+### 3. Compute Pseudomonas rank
+pseudomonas_rank <- match(pseudomonas_full, names(sort(mean_ra, decreasing = TRUE)))
+
+### 4. Combine taxa
+top10_plus_pseudo <- unique(c(top10_taxa, pseudomonas_full))
+
+### 5. Split taxonomy into components
+split_taxa <- strsplit(top10_plus_pseudo, "[./]")
+
+### 6. Extract short names (last element)
+short_names <- sapply(split_taxa, function(x) x[length(x)])
+
+### 7. Identify duplicates
+dups <- names(which(table(short_names) > 1))
+
+### 8. Function to find deepest differing level
+deepest_difference <- function(parts_list) {
+  max_len <- max(sapply(parts_list, length))
+  padded <- t(sapply(parts_list, function(x) c(rep(NA, max_len - length(x)), x)))
+  diff_cols <- apply(padded, 2, function(col) length(unique(col)) > 1)
+  last_diff <- max(which(diff_cols))
+  sapply(seq_len(nrow(padded)), function(i) padded[i, last_diff])
+}
+
+### 9. Build final labels
+final_labels <- short_names
+
+for (dup in dups) {
+  idx <- which(short_names == dup)
+  differing_parts <- deepest_difference(split_taxa[idx])
+  final_labels[idx] <- paste0(short_names[idx], " (", differing_parts, ")")
+}
+
+names(final_labels) <- top10_plus_pseudo
+
+### 10. Melt data and apply labels
 dat_top10_long <- dat_mb_ra %>%
   dplyr::select(sid, cluster, all_of(top10_plus_pseudo)) %>%
-  melt(id.vars = c("sid", "cluster"),
-       variable.name = "taxa",
-       value.name = "rel_abundance")
-  # Convert to long for plotting
+  reshape2::melt(id.vars = c("sid", "cluster"),
+                 variable.name = "taxa",
+                 value.name = "rel_abundance")
+
+# Add line break before parenthetical part for long labels
+final_labels <- gsub(" \\(", "\n(", final_labels)
+names(final_labels) <- names(final_labels)
+
+dat_top10_long$taxa <- final_labels[dat_top10_long$taxa]
+
+### Reorder taxa by abundance (mean_ra)
+# Extract mean abundance for the taxa in the plot
+abund_order <- mean_ra[top10_plus_pseudo]
+
+# Reorder using the final labels
+ordered_labels <- final_labels[order(abund_order, decreasing = TRUE)]
+
+# # OPTIONAL: force Pseudomonas to the end
+# # (remove it, then append it)
+# pseudo_label <- final_labels[pseudomonas_full]
+# ordered_labels <- c(setdiff(ordered_labels, pseudo_label), pseudo_label)
+
+# Apply factor ordering
+dat_top10_long$taxa <- factor(dat_top10_long$taxa,
+                              levels = ordered_labels)
+
+### 11. Plot with automatic Pseudomonas rank in title
 p <- ggplot(dat_top10_long, aes(x = taxa, y = rel_abundance)) +
   geom_boxplot(aes(fill = factor(cluster))) +
   xlab("Bacterial Taxa") +
   ylab("Relative Abundance") +
-  ggtitle("Top 10 Most Abundant Bacteria by Group + Pseudomonas (Rank 18)") +
+  ggtitle(paste0("Top 10 Most Abundant Bacteria + Pseudomonas (Rank ", pseudomonas_rank, ")")) +
   guides(fill = guide_legend(title = "Cluster")) +
   facet_wrap(~ taxa, scales = "free")
+
 p
 ```
 
+```{r}
+# library(dplyr)
+# library(purrr)
+# library(broom)
+# 
+# run_univariate_anovas <- function(
+#   data,
+#   group_var,
+#   vars = NULL,
+#   fdr_cutoff = 0.05
+# ) {
+#   group_var <- rlang::ensym(group_var)
+# 
+#   if (is.null(vars)) {
+#     vars <- data %>%
+#       select(where(is.numeric), -!!group_var) %>%
+#       names()
+#   }
+# 
+#   results <- map_dfr(vars, function(v) {
+#     formula <- as.formula(paste(v, "~", rlang::as_string(group_var)))
+# 
+#     p <- aov(formula, data = data) %>%
+#       tidy() %>%
+#       filter(term != "Residual") %>%
+#       slice(1) %>%
+#       pull(p.value)
+# 
+#     tibble(variable = v, p.value = p)
+#   })
+# 
+#   results <- results %>%
+#     mutate(p_adj = p.adjust(p.value, method = "fdr")) %>%
+#     arrange(p_adj)
+# 
+#   list(
+#     significant = results %>% filter(p_adj < fdr_cutoff),
+#     all_results = results
+#   )
+# }
+# 
+# groups <- data.frame(cbind(sid = rownames(dat_mb_T1), joint = flgClust, mb = mbClust, pt = protClust))
+# groups$sid <- as.numeric(groups$sid)
+# dat_clin <- dat_clin %>%
+#   left_join(groups, by = "sid") %>%
+#   mutate(
+#     genotype_F508del = str_count(paste(genotypes1, genotypes2), "F508del"),
+#     fev1_2v1 = tp2_fev1_pred - tp1_fev1_pred,
+#     fev1_3v1 = tp3_fev1_pred - tp1_fev1_pred,
+#     fvc_2v1 = tp2_fvc_pred - tp1_fvc_pred,
+#     fvc_3v1 = tp3_fvc_pred - tp1_fvc_pred,
+#     pes_2v1 = tp2_pes_total - tp1_pes_total,
+#     pes_3v1 = tp3_pes_total - tp1_pes_total
+#   )
+# clin_vars <- c(
+#   "gender", "age", "genotype_F508del",
+#   "tp1_fev1_pred", "tp2_fev1_pred", "tp3_fev1_pred", "fev1_2v1", "fev1_3v1",
+#   "tp1_fvc_pred", "tp2_fvc_pred", "tp3_fvc_pred", "fvc_2v1", "fvc_3v1",
+#   "tp1_pes_total", "tp2_pes_total", "tp3_pes_total", "pes_2v1", "pes_3v1"
+# )
+# clin_anova <- run_univariate_anovas(dat_clin, group_var = "joint", vars = clin_vars)
+# clin_anova$all_results
+# 
+# dat_mb_T1$sid <- groups$sid
+# dat_mb_T1$joint <- groups$joint
+# micro_anova <- run_univariate_anovas(dat_mb_T1, group_var = "joint", vars = setdiff(colnames(dat_mb_T1), c("sid", "joint")))
+# micro_anova$significant
+# 
+# dat_pt_T1$sid <- groups$sid
+# dat_pt_T1$joint <- groups$joint
+# soma_anova <- run_univariate_anovas(dat_pt_T1, group_var = "joint", vars = setdiff(colnames(dat_pt_T1), c("sid", "joint")))
+# soma_anova$significant
+```
+
+
+```{r}
+library(dplyr)
+library(purrr)
+library(broom)
+library(stringr)
+
+# ------------------------------------------------------------
+# 1. Function: run univariate ANOVAs with FDR correction
+# ------------------------------------------------------------
+run_univariate_anovas <- function(data, group_var, vars = NULL, fdr_cutoff = 0.05) {
+  group_var <- rlang::ensym(group_var)
+
+  # If no variable list provided, test all numeric variables except the group
+  if (is.null(vars)) {
+    vars <- data %>%
+      select(where(is.numeric), -!!group_var) %>%
+      names()
+  }
+
+  results <- map_dfr(vars, function(v) {
+    formula <- as.formula(paste(v, "~", rlang::as_string(group_var)))
+
+    p <- aov(formula, data = data) %>%
+      tidy() %>%
+      filter(term != "Residual") %>%
+      slice(1) %>%
+      pull(p.value)
+
+    tibble(variable = v, p.value = p)
+  })
+
+  results <- results %>%
+    mutate(p_adj = p.adjust(p.value, method = "fdr")) %>%
+    arrange(p_adj)
+
+  list(
+    significant = results %>% filter(p_adj < fdr_cutoff),
+    all_results = results
+  )
+}
+
+# ------------------------------------------------------------
+# 2. Build cluster table with correct SID alignment
+# ------------------------------------------------------------
+groups <- tibble(
+  sid = as.numeric(rownames(dat_mb_T1)),
+  joint = flgClust,
+  mb = mbClust,
+  pt = protClust
+)
+
+# ------------------------------------------------------------
+# 3. Align datasets by SID and join cleanly
+# ------------------------------------------------------------
+dat_clin <- dat_clin %>%
+  filter(sid %in% groups$sid) %>%      # keep only matched subjects
+  arrange(sid) %>%                     # enforce consistent ordering
+  inner_join(groups %>% arrange(sid),  # join cluster assignments
+             by = "sid") %>%
+  mutate(
+    # genotype count
+    genotype_F508del = str_count(paste(genotypes1, genotypes2), "F508del"),
+
+    # NEW difference variables (statistically sound)
+    fev1_2v1 = tp2_fev1_pred - tp1_fev1_pred,
+    fev1_3v1 = tp3_fev1_pred - tp1_fev1_pred,
+    fvc_2v1 = tp2_fvc_pred - tp1_fvc_pred,
+    fvc_3v1 = tp3_fvc_pred - tp1_fvc_pred,
+    pes_2v1 = tp2_pes_total - tp1_pes_total,
+    pes_3v1 = tp3_pes_total - tp1_pes_total
+  )
+
+# ------------------------------------------------------------
+# 4. Variables to test
+# ------------------------------------------------------------
+clin_vars <- c(
+  "gender", "age", "genotype_F508del",
+  "tp1_fev1_pred", "tp2_fev1_pred", "tp3_fev1_pred",
+  "fev1_2v1", "fev1_3v1",
+  "tp1_fvc_pred", "tp2_fvc_pred", "tp3_fvc_pred",
+  "fvc_2v1", "fvc_3v1",
+  "tp1_pes_total", "tp2_pes_total", "tp3_pes_total",
+  "pes_2v1", "pes_3v1"
+)
+
+# ------------------------------------------------------------
+# 5. Run ANOVAs
+# ------------------------------------------------------------
+clin_anova <- run_univariate_anovas(dat_clin, group_var = joint, vars = clin_vars)
+
+clin_anova$all_results
+
+dat_mb_T1$sid <- groups$sid
+dat_mb_T1$joint <- groups$joint
+micro_anova <- run_univariate_anovas(dat_mb_T1, group_var = joint, vars = setdiff(colnames(dat_mb_T1), c("sid", "joint")))
+micro_anova$significant
+
+dat_pt_T1$sid <- groups$sid
+dat_pt_T1$joint <- groups$joint
+soma_anova <- run_univariate_anovas(dat_pt_T1, group_var = joint, vars = setdiff(colnames(dat_pt_T1), c("sid", "joint")))
+soma_anova$significant
+```
+
+```{r warning=FALSE}
+diff_boxplot <- dat_clin %>%
+  dplyr::select(
+    joint,
+    fev1_2v1,
+    fev1_3v1,
+    fvc_2v1,
+    fvc_3v1
+  ) %>%
+  rename(
+    group = joint,
+    `FEV Time 2 - 1` = fev1_2v1,
+    `FEV Time 3 - 1` = fev1_3v1,
+    `FVC Time 2 - 1` = fvc_2v1,
+    `FVC Time 3 - 1` = fvc_3v1
+  ) %>%
+  pivot_longer(
+    cols = -group,
+    names_to = "variable",
+    values_to = "value"
+  )
+
+p <- ggplot(diff_boxplot, aes(x = variable, y = value)) +
+  geom_boxplot(aes(fill = factor(group))) +
+  labs(
+    x = "Variable",
+    y = "Difference",
+    title = "Percent Predicted FEV and FVC Differences over Time by Group",
+    fill = "Cluster"
+  ) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+
+p
+```
+```{r}
+table1::table1(~ gender + age + genotype_F508del + tp1_fev1_pred + tp2_fev1_pred + tp3_fev1_pred + tp1_fvc_pred + tp2_fvc_pred + tp3_fvc_pred + tp1_pes_total + tp2_pes_total + tp3_pes_total | joint, dat_clin)
+
+dat_table1 <- dat_clin %>%
+  mutate(
+    joint = factor(joint, levels = sort(unique(joint)), labels = paste0("Cluster ", seq_len(Fk)))
+  )  %>%
+  rename(
+    Gender = gender,
+    `Age (years)` = age,
+    `Number of F508del Alleles` = genotype_F508del,
+    `FEV1 % Predicted (TP1)` = tp1_fev1_pred,
+    `FEV1 % Predicted (TP2)` = tp2_fev1_pred,
+    `FEV1 % Predicted (TP3)` = tp3_fev1_pred,
+    `FVC % Predicted (TP1)` = tp1_fvc_pred,
+    `FVC % Predicted (TP2)` = tp2_fvc_pred,
+    `FVC % Predicted (TP3)` = tp3_fvc_pred,
+    `PES Total (TP1)` = tp1_pes_total,
+    `PES Total (TP2)` = tp2_pes_total,
+    `PES Total (TP3)` = tp3_pes_total
+  )
+
+table1::table1(
+  ~ Gender + `Age (years)` + `Number of F508del Alleles` +
+    `FEV1 % Predicted (TP1)` + `FEV1 % Predicted (TP2)` + `FEV1 % Predicted (TP3)` +
+    `FVC % Predicted (TP1)` + `FVC % Predicted (TP2)` + `FVC % Predicted (TP3)` +
+    `PES Total (TP1)` + `PES Total (TP2)` + `PES Total (TP3)`
+  | joint,
+  data = dat_table1
+)
+```
 
