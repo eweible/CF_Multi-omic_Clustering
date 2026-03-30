@@ -3,7 +3,7 @@ title: "Clustering_Code"
 output: html_document
 date: "2026-03-17"
 editor_options: 
-  chunk_output_type: console
+  chunk_output_type: inline
 ---
 
 ```{r setup, include=FALSE}
@@ -710,5 +710,74 @@ table1::table1(
     `PES Total (TP1)` + `PES Total (TP2)` + `PES Total (TP3)`,
   data = dat_table1
 )
+```
+
+```{r}
+# Missingness per variable
+missing_by_group <- dat_clin %>%
+  dplyr::select(all_of(c(clin_vars, "joint"))) %>%
+  pivot_longer(cols = clin_vars, names_to = "variable", values_to = "value") %>%
+  mutate(missing = is.na(value)) %>%
+  group_by(variable, joint) %>%
+  summarise(n_missing = sum(missing), .groups = "drop")
+missing_by_group
+fisher_missing <- dat_clin %>%
+  pivot_longer(cols = clin_vars, names_to = "variable", values_to = "value") %>%
+  mutate(missing = is.na(value)) %>%
+  group_by(variable) %>%
+  summarise(
+    p_missing = {
+      tab <- table(joint, missing)
+
+      # Only run Fisher if table is at least 2x2
+      if (nrow(tab) >= 2 && ncol(tab) >= 2) {
+        fisher.test(tab)$p.value
+      } else {
+        NA_real_
+      }
+    },
+    .groups = "drop"
+  )
+fisher_missing
+  # Missingness does not appear to be associated with group
+```
+```{r}
+# Check variance
+library(car)
+dat_clin$joint <- factor(dat_clin$joint)
+levene_results <- map_dfr(clin_vars, function(v) {
+  formula <- as.formula(paste(v, "~ joint"))
+  p <- tryCatch(
+    leveneTest(formula, data = dat_clin)[1, "Pr(>F)"],
+    error = function(e) NA
+  )
+  tibble(variable = v, levene_p = p)
+})
+levene_results
+
+dat_mb_T1$joint <- factor(dat_mb_T1$joint)
+micro_vars <- setdiff(colnames(dat_mb_T1), c("sid", "joint"))
+micro_vars <- micro_vars[sapply(dat_mb_T1[micro_vars], is.numeric)]
+micro_levene <- map_dfr(micro_vars, function(v) {
+  formula <- as.formula(paste(v, "~ joint"))
+  p <- tryCatch(
+    leveneTest(formula, data = dat_mb_T1)[1, "Pr(>F)"],
+    error = function(e) NA_real_
+  )
+  tibble(variable = v, levene_p = p)
+})
+dat_pt_T1$joint <- factor(dat_pt_T1$joint)
+soma_vars <- setdiff(colnames(dat_pt_T1), c("sid", "joint"))
+soma_vars <- soma_vars[sapply(dat_pt_T1[soma_vars], is.numeric)]
+soma_levene <- map_dfr(soma_vars, function(v) {
+  formula <- as.formula(paste(v, "~ joint"))
+  p <- tryCatch(
+    leveneTest(formula, data = dat_pt_T1)[1, "Pr(>F)"],
+    error = function(e) NA_real_
+  )
+  tibble(variable = v, levene_p = p)
+})
+
+micro_levene[micro_levene$variable %in% sig_taxa,]
 ```
 
