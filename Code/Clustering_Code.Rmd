@@ -223,6 +223,83 @@ ggplot(
   theme_minimal()
 ```
 
+```{r}
+cluster_microbiome <- function(mk){
+  mb_vecs <- mb_eigSft$vectors
+  mbInd <- 1:mk
+  mbv <- mb_vecs[,mbInd]
+  mbGMM <- GMM(mbv, mk, dist_mode = 'eucl_dist', em_iter = 15)
+  mbClust <- predict(mbGMM, newdata = mbv)
+}
+cluster_proteomics <- function(pk){
+  prot_vecs <- prot_eigSft$vectors
+  protInd <- 1:pk
+  pev <- prot_eigSft$vectors[,protInd] 
+  set.seed(10)
+  protClust <- kmeans(pev, pk, nstart=5)$cluster
+}
+
+# Microbiome clusters
+mbClust3 <- cluster_microbiome(3)
+mbClust4 <- cluster_microbiome(4)
+mbClust5 <- cluster_microbiome(5)
+
+# Proteomics clusters
+protClust3 <- cluster_proteomics(3)
+protClust4 <- cluster_proteomics(4)
+protClust5 <- cluster_proteomics(5)
+
+alluvial_df <- data.frame(
+    sid = rownames(dat_mb_T1),
+    joint = factor(flgClust),
+    mb3 = mbClust3,
+    mb4 = mbClust4,
+    mb5 = mbClust5,
+    pt3 = protClust3,
+    pt4 = protClust4,
+    pt5 = protClust5,
+    stringsAsFactors = FALSE
+  ) %>%
+  pivot_longer(
+    cols = c(mb5, mb4, mb3, pt3, pt4, pt5),
+    names_to = "axis",
+    values_to = "cluster"
+  ) %>%
+  mutate(
+    axis = factor(axis, levels = c("mb5","mb4","mb3","pt3","pt4","pt5"))
+  ) 
+
+ggplot(
+  alluvial_df,
+  aes(
+    x = axis,
+    stratum = cluster,
+    alluvium = sid,
+  )
+) +
+  geom_flow(aes(fill = joint), alpha = 0.6) +
+  geom_stratum(fill = "white", color = "black") +
+  geom_text(stat = "stratum", aes(label = after_stat(stratum))) +
+  scale_x_discrete(
+    labels = c(
+      "mb5" = "Microbiome (5)",
+      "mb4" = "Microbiome (4)",
+      "mb3" = "Microbiome (3)",
+      "pt3" = "Proteomics (3)",
+      "pt4" = "Proteomics (4)",
+      "pt5" = "Proteomics (5)"
+    )
+  ) +
+  labs(
+    title = "Joint Cluster Comparison Across All Microbiome and Proteomics Cluster Solutions",
+    y = "Number of Individuals",
+    fill = "Joint Cluster",
+    x = ""
+  ) +
+  theme_minimal()
+```
+
+
 ```{r warning=FALSE}
 clusters <- sapply(2:6, function(K){
   set.seed(4)
@@ -361,11 +438,6 @@ abund_order <- mean_ra[top10_plus_pseudo]
 # Reorder using the final labels
 ordered_labels <- final_labels[order(abund_order, decreasing = TRUE)]
 
-# # OPTIONAL: force Pseudomonas to the end
-# # (remove it, then append it)
-# pseudo_label <- final_labels[pseudomonas_full]
-# ordered_labels <- c(setdiff(ordered_labels, pseudo_label), pseudo_label)
-
 # Apply factor ordering
 dat_top10_long$taxa <- factor(dat_top10_long$taxa,
                               levels = ordered_labels)
@@ -381,81 +453,6 @@ p <- ggplot(dat_top10_long, aes(x = taxa, y = rel_abundance)) +
 
 p
 ```
-
-```{r}
-# library(dplyr)
-# library(purrr)
-# library(broom)
-# 
-# run_univariate_anovas <- function(
-#   data,
-#   group_var,
-#   vars = NULL,
-#   fdr_cutoff = 0.05
-# ) {
-#   group_var <- rlang::ensym(group_var)
-# 
-#   if (is.null(vars)) {
-#     vars <- data %>%
-#       select(where(is.numeric), -!!group_var) %>%
-#       names()
-#   }
-# 
-#   results <- map_dfr(vars, function(v) {
-#     formula <- as.formula(paste(v, "~", rlang::as_string(group_var)))
-# 
-#     p <- aov(formula, data = data) %>%
-#       tidy() %>%
-#       filter(term != "Residual") %>%
-#       slice(1) %>%
-#       pull(p.value)
-# 
-#     tibble(variable = v, p.value = p)
-#   })
-# 
-#   results <- results %>%
-#     mutate(p_adj = p.adjust(p.value, method = "fdr")) %>%
-#     arrange(p_adj)
-# 
-#   list(
-#     significant = results %>% filter(p_adj < fdr_cutoff),
-#     all_results = results
-#   )
-# }
-# 
-# groups <- data.frame(cbind(sid = rownames(dat_mb_T1), joint = flgClust, mb = mbClust, pt = protClust))
-# groups$sid <- as.numeric(groups$sid)
-# dat_clin <- dat_clin %>%
-#   left_join(groups, by = "sid") %>%
-#   mutate(
-#     genotype_F508del = str_count(paste(genotypes1, genotypes2), "F508del"),
-#     fev1_2v1 = tp2_fev1_pred - tp1_fev1_pred,
-#     fev1_3v1 = tp3_fev1_pred - tp1_fev1_pred,
-#     fvc_2v1 = tp2_fvc_pred - tp1_fvc_pred,
-#     fvc_3v1 = tp3_fvc_pred - tp1_fvc_pred,
-#     pes_2v1 = tp2_pes_total - tp1_pes_total,
-#     pes_3v1 = tp3_pes_total - tp1_pes_total
-#   )
-# clin_vars <- c(
-#   "gender", "age", "genotype_F508del",
-#   "tp1_fev1_pred", "tp2_fev1_pred", "tp3_fev1_pred", "fev1_2v1", "fev1_3v1",
-#   "tp1_fvc_pred", "tp2_fvc_pred", "tp3_fvc_pred", "fvc_2v1", "fvc_3v1",
-#   "tp1_pes_total", "tp2_pes_total", "tp3_pes_total", "pes_2v1", "pes_3v1"
-# )
-# clin_anova <- run_univariate_anovas(dat_clin, group_var = "joint", vars = clin_vars)
-# clin_anova$all_results
-# 
-# dat_mb_T1$sid <- groups$sid
-# dat_mb_T1$joint <- groups$joint
-# micro_anova <- run_univariate_anovas(dat_mb_T1, group_var = "joint", vars = setdiff(colnames(dat_mb_T1), c("sid", "joint")))
-# micro_anova$significant
-# 
-# dat_pt_T1$sid <- groups$sid
-# dat_pt_T1$joint <- groups$joint
-# soma_anova <- run_univariate_anovas(dat_pt_T1, group_var = "joint", vars = setdiff(colnames(dat_pt_T1), c("sid", "joint")))
-# soma_anova$significant
-```
-
 
 ```{r}
 library(dplyr)
@@ -533,13 +530,14 @@ dat_clin <- dat_clin %>%
 # 4. Variables to test
 # ------------------------------------------------------------
 clin_vars <- c(
-  "gender", "age", "genotype_F508del",
+  "gender", "age", "genotype_F508del", "tp1_pe_pastyr", 
+  "tp1_hosp_pastyr", "tp1_height", "tp1_weight",
   "tp1_fev1_pred", "tp2_fev1_pred", "tp3_fev1_pred",
   "fev1_2v1", "fev1_3v1",
   "tp1_fvc_pred", "tp2_fvc_pred", "tp3_fvc_pred",
   "fvc_2v1", "fvc_3v1",
   "tp1_pes_total", "tp2_pes_total", "tp3_pes_total",
-  "pes_2v1", "pes_3v1"
+  "pes_2v1", "pes_3v1", 
 )
 
 # ------------------------------------------------------------
@@ -557,8 +555,79 @@ micro_anova$significant
 dat_pt_T1$sid <- groups$sid
 dat_pt_T1$joint <- groups$joint
 soma_anova <- run_univariate_anovas(dat_pt_T1, group_var = joint, vars = setdiff(colnames(dat_pt_T1), c("sid", "joint")))
-soma_anova$significant
+head(soma_anova$all_results, 20)
 ```
+
+```{r}
+  # Select statistically significant taxa
+### --- 0. Compute relative abundance matrix ---
+tots <- rowSums(dat_mb_wide[,-1], na.rm = TRUE)
+dat_mb_ra <- sweep(dat_mb_wide[,-1], 1, tots, FUN = "/")
+dat_mb_ra <- data.frame(sid = dat_mb_wide$sid, cluster = flgClust, dat_mb_ra)
+
+mean_ra <- colMeans(dat_mb_ra[, !(names(dat_mb_ra) %in% c("sid", "cluster"))],
+                    na.rm = TRUE)
+
+### --- 1. Select statistically significant taxa ---
+sig_taxa <- micro_anova$significant$variable
+# sig_taxa <- sig_taxa[sig_taxa %in% colnames(dat_mb_ra)]
+
+### --- 2. Split taxonomy and create short names ---
+split_taxa <- strsplit(sig_taxa, "[./]")
+short_names <- sapply(split_taxa, function(x) x[length(x)])
+
+### --- 3. Identify duplicates and resolve deeper taxonomy ---
+dups <- names(which(table(short_names) > 1))
+
+deepest_difference <- function(parts_list) {
+  max_len <- max(sapply(parts_list, length))
+  padded <- t(sapply(parts_list, function(x) c(rep(NA, max_len - length(x)), x)))
+  diff_cols <- apply(padded, 2, function(col) length(unique(col)) > 1)
+  last_diff <- max(which(diff_cols))
+  sapply(seq_len(nrow(padded)), function(i) padded[i, last_diff])
+}
+
+final_labels <- short_names
+for (dup in dups) {
+  idx <- which(short_names == dup)
+  differing_parts <- deepest_difference(split_taxa[idx])
+  final_labels[idx] <- paste0(short_names[idx], " (", differing_parts, ")")
+}
+
+names(final_labels) <- sig_taxa
+
+### --- 4. Melt data for plotting ---
+dat_sig_long <- dat_mb_ra %>%
+  dplyr::select(sid, cluster, all_of(sig_taxa)) %>%
+  reshape2::melt(id.vars = c("sid", "cluster"),
+                 variable.name = "taxa",
+                 value.name = "rel_abundance")
+
+# Add line break before parentheses for readability
+final_labels <- gsub(" \\(", "\n(", final_labels)
+
+dat_sig_long$taxa <- final_labels[dat_sig_long$taxa]
+
+### --- 5. Order taxa by mean abundance ---
+abund_order <- mean_ra[sig_taxa]
+ordered_labels <- final_labels[order(abund_order, decreasing = TRUE)]
+
+dat_sig_long$taxa <- factor(dat_sig_long$taxa,
+                            levels = ordered_labels)
+
+### --- 6. Plot ---
+p <- ggplot(dat_sig_long, aes(x = taxa, y = rel_abundance)) +
+  geom_boxplot(aes(fill = factor(cluster))) +
+  xlab("Bacterial Taxa") +
+  ylab("Relative Abundance") +
+  ggtitle(paste0("Statistically Significant Bacteria (FDR < 0.05, n = ",
+                 length(sig_taxa), ")")) +
+  guides(fill = guide_legend(title = "Cluster")) +
+  facet_wrap(~ taxa, scales = "free")
+
+p
+```
+
 
 ```{r warning=FALSE}
 diff_boxplot <- dat_clin %>%
@@ -571,8 +640,8 @@ diff_boxplot <- dat_clin %>%
   ) %>%
   rename(
     group = joint,
-    `FEV Time 2 - 1` = fev1_2v1,
-    `FEV Time 3 - 1` = fev1_3v1,
+    `FEV1 Time 2 - 1` = fev1_2v1,
+    `FEV1 Time 3 - 1` = fev1_3v1,
     `FVC Time 2 - 1` = fvc_2v1,
     `FVC Time 3 - 1` = fvc_3v1
   ) %>%
@@ -587,7 +656,7 @@ p <- ggplot(diff_boxplot, aes(x = variable, y = value)) +
   labs(
     x = "Variable",
     y = "Difference",
-    title = "Percent Predicted FEV and FVC Differences over Time by Group",
+    title = "Percent Predicted FEV1 and FVC Differences over Time by Group",
     fill = "Cluster"
   ) +
   theme_bw() +
@@ -604,7 +673,7 @@ dat_table1 <- dat_clin %>%
   )  %>%
   rename(
     Gender = gender,
-    `Age (years)` = age,
+    `Age (years; TP1)` = age,
     `Number of F508del Alleles` = genotype_F508del,
     `FEV1 % Predicted (TP1)` = tp1_fev1_pred,
     `FEV1 % Predicted (TP2)` = tp2_fev1_pred,
@@ -614,15 +683,31 @@ dat_table1 <- dat_clin %>%
     `FVC % Predicted (TP3)` = tp3_fvc_pred,
     `PES Total (TP1)` = tp1_pes_total,
     `PES Total (TP2)` = tp2_pes_total,
-    `PES Total (TP3)` = tp3_pes_total
+    `PES Total (TP3)` = tp3_pes_total,
+    `Pulmonary Exacerbations (Past Year; TP1)` = tp1_pe_pastyr, 
+    `Hospitalizations (Past Year; TP1)` = tp1_hosp_pastyr, 
+    `Height (cm; TP1)` = tp1_height, 
+    `Weight (kg; TP1)` = tp1_weight
   )
 
 table1::table1(
-  ~ Gender + `Age (years)` + `Number of F508del Alleles` +
-    `FEV1 % Predicted (TP1)` + #`FEV1 % Predicted (TP2)` + `FEV1 % Predicted (TP3)` +
-    `FVC % Predicted (TP1)` + #`FVC % Predicted (TP2)` + `FVC % Predicted (TP3)` +
-    `PES Total (TP1)` #+ `PES Total (TP2)` + `PES Total (TP3)`
+  ~ Gender + `Age (years; TP1)` + `Number of F508del Alleles` +
+    `Height (cm; TP1)` + `Weight (kg; TP1)` + 
+    `Pulmonary Exacerbations (Past Year; TP1)` + `Hospitalizations (Past Year; TP1)` +
+    `FEV1 % Predicted (TP1)` + `FEV1 % Predicted (TP2)` + `FEV1 % Predicted (TP3)` +
+    `FVC % Predicted (TP1)` + `FVC % Predicted (TP2)` + `FVC % Predicted (TP3)` +
+    `PES Total (TP1)` + `PES Total (TP2)` + `PES Total (TP3)`
   | joint,
+  data = dat_table1
+)
+
+table1::table1(
+  ~ Gender + `Age (years; TP1)` + `Number of F508del Alleles` +
+    `Height (cm; TP1)` + `Weight (kg; TP1)` + 
+    `Pulmonary Exacerbations (Past Year; TP1)` + `Hospitalizations (Past Year; TP1)` +
+    `FEV1 % Predicted (TP1)` + `FEV1 % Predicted (TP2)` + `FEV1 % Predicted (TP3)` +
+    `FVC % Predicted (TP1)` + `FVC % Predicted (TP2)` + `FVC % Predicted (TP3)` +
+    `PES Total (TP1)` + `PES Total (TP2)` + `PES Total (TP3)`,
   data = dat_table1
 )
 ```
