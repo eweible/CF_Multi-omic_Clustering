@@ -3,7 +3,7 @@ title: "Clustering_Code"
 output: html_document
 date: "2026-03-17"
 editor_options: 
-  chunk_output_type: inline
+  chunk_output_type: console
 ---
 
 ```{r setup, include=FALSE}
@@ -514,10 +514,9 @@ dat_clin <- dat_clin %>%
   inner_join(groups %>% arrange(sid),  # join cluster assignments
              by = "sid") %>%
   mutate(
-    # genotype count
     genotype_F508del = str_count(paste(genotypes1, genotypes2), "F508del"),
-
-    # NEW difference variables (statistically sound)
+    gender = factor(gender),  
+    # difference variables 
     fev1_2v1 = tp2_fev1_pred - tp1_fev1_pred,
     fev1_3v1 = tp3_fev1_pred - tp1_fev1_pred,
     fvc_2v1 = tp2_fvc_pred - tp1_fvc_pred,
@@ -665,11 +664,10 @@ p <- ggplot(diff_boxplot, aes(x = variable, y = value)) +
 p
 ```
 ```{r}
-table1::table1(~ gender + age + genotype_F508del + tp1_fev1_pred + tp2_fev1_pred + tp3_fev1_pred + tp1_fvc_pred + tp2_fvc_pred + tp3_fvc_pred + tp1_pes_total + tp2_pes_total + tp3_pes_total | joint, dat_clin)
-
 dat_table1 <- dat_clin %>%
   mutate(
-    joint = factor(joint, levels = sort(unique(joint)), labels = paste0("Cluster ", seq_len(Fk)))
+    joint = factor(joint, levels = sort(unique(joint)), labels = paste0("Cluster ", seq_len(Fk))),
+    gender = factor(gender, levels = c(1, 2), labels = c("Male", "Female"))
   )  %>%
   rename(
     Gender = gender,
@@ -700,6 +698,7 @@ table1::table1(
   | joint,
   data = dat_table1
 )
+
 
 table1::table1(
   ~ Gender + `Age (years; TP1)` + `Number of F508del Alleles` +

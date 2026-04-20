@@ -522,8 +522,8 @@ mb_vecs <- mb_eigSft$vectors
 mb_for_nb <- mb_vecs[, 1:5]   
   # first 5 eigenvectors
 NbClust(mb_for_nb, diss = b, distance = NULL, method = "kmeans", index = "alllong")
-  # TraceW gives 3
-mk <- 6
+  # TrCovW  gives 3
+mk <- 3
 mbInd <- 1:mk
 mbv <- mb_vecs[,mbInd]
 mbGMM <- GMM(mbv, mk, dist_mode = 'eucl_dist', em_iter = 15)
@@ -532,8 +532,8 @@ mbClust <- predict(mbGMM, newdata = mbv)
 prot_vecs <- prot_eigSft$vectors
 prot_for_nb <- prot_vecs[, 1:5]
 NbClust(prot_for_nb, diss = c, distance = NULL, method = "kmeans", index = "alllong")
-  # TraceW gives 5
-pk <- 6
+  # TrCovW gives 4
+pk <- 4
 protInd <- 1:pk
 pev <- prot_eigSft$vectors[,protInd] 
 set.seed(10)
@@ -548,8 +548,8 @@ flm <- flmSym <- flagMean(list(Up, Um), plots = FALSE)
 flm.vecs <- flm$u
 
 NbClust(flm.vecs, method = 'kmeans', index='alllong')
-  # TraceW gives 3
-Fk <- 3
+  # TrCovW gives 4
+Fk <- 4
 set.seed(235)
 flgClust <- kmeans(flm.vecs[,1:4], centers = Fk, nstart = 10)$cluster
 
@@ -1398,24 +1398,24 @@ SpectrumK <- function(dd, m=1){
 Cleaned data is produced in the CleanAllTimePoints_Ezra.R file. Due to the difference in the number of usable patients for the microbiome and proteomics data at some timepoints, the data is separated into different csv files for each timepoint and each type of data. A RData filetype with all of the data compiled into one file or one file per timepoint can alternatively be generated. 
 ```{r}
 # Raw Data -----------------------------------------------------------------
-microbiome_raw <- read.table(here::here("Data", "RawData_Seq_Micro.txt"), header = T, sep = ',')
-proteomic_raw <- read.table(here::here("Data", "RawData_Soma_Prot.txt"), header = T, sep = ',')
+microbiome_raw <- read.table(here::here("DataRaw", "RawData_Seq_Micro.txt"), header = T, sep = ',')
+proteomic_raw <- read.table(here::here("DataRaw", "RawData_Soma_Prot.txt"), header = T, sep = ',')
 
 # Cleaned Data --------------------------------------------------------------
 mb_T1 <- read.csv(here::here("DataProcessed", "CF_clean_T1_micro.csv"))
 sid_1 <- c(26,27,28,30,33,35,37,38,39,41,42,44,46,48,50,51,52,53,57,59,61,62,63,64,66,67,68,69,70,72,74)
 rownames(mb_T1) <- sid_1
 mb_T1 <- subset(mb_T1, select = -c(X))
-
-mb_T2 <- read.csv(here::here("Data", "CF_clean_T2_micro.csv"))
-mb_T3 <- read.csv(here::here("Data", "CF_clean_T3_micro.csv"))
+# 
+# mb_T2 <- read.csv(here::here("Data", "CF_clean_T2_micro.csv"))
+# mb_T3 <- read.csv(here::here("Data", "CF_clean_T3_micro.csv"))
 
 pt_T1 <- read.csv(here::here("DataProcessed", "CF_clean_T1_prot.csv"))
 rownames(pt_T1) <- sid_1
 pt_T1 <- subset(pt_T1, select = -c(X))
 
-pt_T2 <- read.csv(here::here("Data", "CF_clean_T2_prot.csv"))
-pt_T3 <- read.csv(here::here("Data", "CF_clean_T3_prot.csv"))
+# pt_T2 <- read.csv(here::here("Data", "CF_clean_T2_prot.csv"))
+# pt_T3 <- read.csv(here::here("Data", "CF_clean_T3_prot.csv"))
 ```
 
 
@@ -1450,13 +1450,14 @@ prot_eigSft <- eigen(prot_LapSft)
 
 mb_vecs <- mb_eigSft$vectors
 
-mk <- 2
+mk <- 4
 mbInd <- 1:mk
 mbv <- mb_vecs[,mbInd]
 
 mbGMM <- GMM(mbv, mk, dist_mode = 'eucl_dist', #Probably used this one for mb because it is messier than proteomics. kmeans is more standard (below) and proteomics is cleaner
              em_iter = 15)
 mbClust <- predict(mbGMM, newdata = mbv)
+  # 4 4 4 4 1 4 4 4 4 2 2 4 3 1 1 3 1 1 1 3 1 1 2 3 3 1 3 1 2 3 3
 
 # * Prots -----------------------------------------------------------------
 
@@ -1571,7 +1572,7 @@ group_subset4 <- subset(group_T1_info, Group_Clust == 4)
 ```
 
 ```{r}
-clin_data <- read.csv(here::here("Data", "CF_pex_clinical.txt"))
+clin_data <- read.csv(here::here("DataRaw", "CF_pex_clinical.txt"))
 
 clin_group1 <- data.frame(matrix(data = NA, nrow = nrow(group_subset1), ncol = length(clin_data)))
 colnames(clin_group1) <- colnames(clin_data)
@@ -1867,39 +1868,39 @@ p
 Using uniprot to upload the list of proteins from the proteomics file to determine which are immune system proteins/decide which may be relevant to test for differences by group (https://www.uniprot.org/id-mapping, see results at https://www.uniprot.org/tool-dashboard for first week or at https://www.uniprot.org/id-mapping/uniprotkb/f16336aa45b183a0bc0a8acadc6412456667266f/overview?facets=reviewed%3Atrue%2Cmodel_organism%3A9606&fields=accession%2Cid%2Cprotein_name%2Cgene_names%2Cgo_p%2Cgo_c%2Cgo%2Cgo_f). I also downloaded the file with all of the information - looks like there are 5 proteins that are immune system ?? 
 
 ```{r}
-raw_prot <- read.csv(here::here("Data", "RawData_Soma_Prot.txt"))
-uniProt_raw <- raw_prot$UniProt
-#write.csv(uniProt_raw, file = "uniProt_raw.csv")
-immune_system_prots <- readxl::read_excel(here::here("Data", "UniProt Info/immuneSubset_2025_04_02.xlsx"))
-immune_system_prots$Entry
-  #Aligns with protein names in pt_T1 of LRIT2, LIRA5, CLM7, Eotaxin.2, and TLR4.MD.2.complex / TLR4
-
-prot_immune <- subset(pt_T1, select = c(LRIT2, LIRA5, CLM7, Eotaxin.2, TLR4, TLR4.MD.2.complex))
-
-prot_immune$group <- group_T1_info$Group_Clust
-
-# Test univariate anovas for these immune proteins
-p_vals_immune <- data.frame(matrix(NA, nrow = 2, ncol = 6))
-rownames(p_vals_immune) <- c("Unadjusted", "Adjusted")
-colnames(p_vals_immune) <- c("LRIT2", "LIRA5", "CLM7", "Eotaxin.2", "TLR4", "TLR4.MD.2.complex")
-
-p_vals_immune$LRIT2[1] <- summary(aov(group ~ LRIT2, 
-                                      data = prot_immune))[[1]][["Pr(>F)"]][1]
-p_vals_immune$LIRA5[1] <- summary(aov(group ~ LIRA5, 
-                                      data = prot_immune))[[1]][["Pr(>F)"]][1]
-p_vals_immune$CLM7[1] <- summary(aov(group ~ CLM7, 
-                                     data = prot_immune))[[1]][["Pr(>F)"]][1]
-p_vals_immune$Eotaxin.2[1] <- summary(aov(group ~ Eotaxin.2, 
-                                      data = prot_immune))[[1]][["Pr(>F)"]][1]
-p_vals_immune$TLR4[1] <- summary(aov(group ~ TLR4, 
-                                      data = prot_immune))[[1]][["Pr(>F)"]][1]
-p_vals_immune$TLR4.MD.2.complex[1] <- summary(aov(group ~ TLR4.MD.2.complex, 
-                                      data = prot_immune))[[1]][["Pr(>F)"]][1]
-
-p_vals_immune[2, ] <- p.adjust(p_vals_immune[1,], method = "fdr")
-
-p_vals_immune
-  # None of these are significant with a 0.05 cutoff, but LRIT2 and Eotaxin.2 show marginal significance around 0.08 after adjustment.
+# raw_prot <- read.csv(here::here("DataRaw", "RawData_Soma_Prot.txt"))
+# uniProt_raw <- raw_prot$UniProt
+# #write.csv(uniProt_raw, file = "uniProt_raw.csv")
+# immune_system_prots <- readxl::read_excel(here::here("Data", "UniProt Info/immuneSubset_2025_04_02.xlsx"))
+# immune_system_prots$Entry
+#   #Aligns with protein names in pt_T1 of LRIT2, LIRA5, CLM7, Eotaxin.2, and TLR4.MD.2.complex / TLR4
+# 
+# prot_immune <- subset(pt_T1, select = c(LRIT2, LIRA5, CLM7, Eotaxin.2, TLR4, TLR4.MD.2.complex))
+# 
+# prot_immune$group <- group_T1_info$Group_Clust
+# 
+# # Test univariate anovas for these immune proteins
+# p_vals_immune <- data.frame(matrix(NA, nrow = 2, ncol = 6))
+# rownames(p_vals_immune) <- c("Unadjusted", "Adjusted")
+# colnames(p_vals_immune) <- c("LRIT2", "LIRA5", "CLM7", "Eotaxin.2", "TLR4", "TLR4.MD.2.complex")
+# 
+# p_vals_immune$LRIT2[1] <- summary(aov(group ~ LRIT2, 
+#                                       data = prot_immune))[[1]][["Pr(>F)"]][1]
+# p_vals_immune$LIRA5[1] <- summary(aov(group ~ LIRA5, 
+#                                       data = prot_immune))[[1]][["Pr(>F)"]][1]
+# p_vals_immune$CLM7[1] <- summary(aov(group ~ CLM7, 
+#                                      data = prot_immune))[[1]][["Pr(>F)"]][1]
+# p_vals_immune$Eotaxin.2[1] <- summary(aov(group ~ Eotaxin.2, 
+#                                       data = prot_immune))[[1]][["Pr(>F)"]][1]
+# p_vals_immune$TLR4[1] <- summary(aov(group ~ TLR4, 
+#                                       data = prot_immune))[[1]][["Pr(>F)"]][1]
+# p_vals_immune$TLR4.MD.2.complex[1] <- summary(aov(group ~ TLR4.MD.2.complex, 
+#                                       data = prot_immune))[[1]][["Pr(>F)"]][1]
+# 
+# p_vals_immune[2, ] <- p.adjust(p_vals_immune[1,], method = "fdr")
+# 
+# p_vals_immune
+#   # None of these are significant with a 0.05 cutoff, but LRIT2 and Eotaxin.2 show marginal significance around 0.08 after adjustment.
 ```
 
 
