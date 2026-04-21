@@ -3,7 +3,7 @@ title: "Clustering_Code"
 output: html_document
 date: "2026-03-17"
 editor_options: 
-  chunk_output_type: console
+  chunk_output_type: inline
 ---
 
 ```{r setup, include=FALSE}
@@ -147,8 +147,8 @@ mb_vecs <- mb_eigSft$vectors
 mb_for_nb <- mb_vecs[, 1:5]   
   # first 5 eigenvectors
 NbClust(mb_for_nb, distance = "euclidean", method = "kmeans", index = "alllong")
-  # TraceW gives 4, TrCovW gives 3
-mk <- 3
+  # TrCovW gives 4, TraceW gives 3
+mk <- 4
 mbInd <- 1:mk
 mbv <- mb_vecs[,mbInd]
 mbGMM <- GMM(mbv, mk, dist_mode = 'eucl_dist', em_iter = 15)
@@ -174,8 +174,8 @@ flm <- flmSym <- flagMean(list(Up, Um), plots = FALSE)
 flm.vecs <- flm$u
 
 NbClust(flm.vecs, method = 'kmeans', index='alllong')
-  # If pt is 3: TraceW gives 4, TrCovW gives 4
-Fk <- 4
+  # TrCovW gives 3
+Fk <- 3
 set.seed(235)
 flgClust <- kmeans(flm.vecs[,1:4], centers = Fk, nstart = 10)$cluster
 
@@ -515,8 +515,6 @@ dat_clin <- dat_clin %>%
              by = "sid") %>%
   mutate(
     genotype_F508del = str_count(paste(genotypes1, genotypes2), "F508del"),
-    gender = factor(gender),  
-    # difference variables 
     fev1_2v1 = tp2_fev1_pred - tp1_fev1_pred,
     fev1_3v1 = tp3_fev1_pred - tp1_fev1_pred,
     fvc_2v1 = tp2_fvc_pred - tp1_fvc_pred,
@@ -536,13 +534,13 @@ clin_vars <- c(
   "tp1_fvc_pred", "tp2_fvc_pred", "tp3_fvc_pred",
   "fvc_2v1", "fvc_3v1",
   "tp1_pes_total", "tp2_pes_total", "tp3_pes_total",
-  "pes_2v1", "pes_3v1", 
+  "pes_2v1", "pes_3v1"
 )
 
 # ------------------------------------------------------------
 # 5. Run ANOVAs
 # ------------------------------------------------------------
-clin_anova <- run_univariate_anovas(dat_clin, group_var = joint, vars = clin_vars)
+clin_anova <- run_univariate_anovas(dat_clin, group_var = "joint", vars = clin_vars)
 
 clin_anova$all_results
 
