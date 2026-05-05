@@ -1,5 +1,5 @@
 ---
-title: "Clustering_Code"
+title: "Clustering_Distances"
 output: html_document
 date: "2026-03-17"
 editor_options: 
@@ -22,116 +22,114 @@ source(here::here("Code", "Simulation_Functions.R"))
 # dat_pt_T1 <- read.csv(here::here("DataProcessed", "CF_clean_T1_pt.csv"))
 ```
 
-Data Cleaning with updated datasets
 ```{r}
-dat_mb <- read.csv(here::here("DataProcessed", "micro.csv"), header = TRUE)
-dat_pt <- read.csv(here::here("DataProcessed", "soma.csv"), header = TRUE)
-
-## Microbiome ------------------------------------------------------------------
-
-dat_mb_wide <- dat_mb %>%
-  dplyr::select(sid, OTU_Name, seq_count) %>%
-  tidyr::pivot_wider(
-    names_from = OTU_Name,
-    values_from = seq_count#,
-    #values_fn = max
-  ) # Convert to wide
-
-# > dim(dat_mb)
-# [1] 2263   46
-# > dim(dat_mb_wide)
-# [1] 31 74
-# > length(unique(dat_mb$sid))
-# [1] 31
-# > length(unique(dat_mb$OTU_Name))
-# [1] 73
-
-tots_new <- rowSums(dat_mb_wide[,-1])
-  # Sequencing depth
-
-dat_mb_clr <- sweep(dat_mb_wide[,-1], 1, 1/tots_new, "+") %>%
-  apply(1, clr) %>%
-  t() # CLR transform with pseudocount
-
-batch <- floor((dat_mb_wide$sid - 1) / 25) + 1
-  # Create batch variable
-
-mb_mat <- t(dat_mb_clr)
-  # Adjust format
-
-mb_corrected <- ComBat(
-  dat = mb_mat,
-  batch = batch,
-  par.prior = TRUE,
-  prior.plots = FALSE
-) # Batch correction
-
-mb_corrected <- t(mb_corrected)
-  # Return to original format
-
-dat_mb_T1 <- data.frame(cbind(sid = dat_mb_wide$sid, mb_corrected))
-  # Add sid back
-
-## Proteomics ------------------------------------------------------------------
-
-dat_pt_wide <- dat_pt %>%
-  dplyr::select(sid, somaid2, lmeas) %>%
-  tidyr::pivot_wider(
-    names_from = somaid2,
-    values_from = lmeas#,
-    #values_fn = max
-  ) # Convert to wide
-
-# > dim(dat_pt)
-# [1] 120714     15
-# > dim(dat_pt_wide)
-# [1]   31 3895
-# > length(unique(dat_pt$sid))
-# [1] 31
-# > length(unique(dat_pt$somaid2))
-# [1] 3894
-
-batch <- floor((dat_pt_wide$sid - 1) / 25) + 1
-  # Create batch variable
-
-prot_mat <- t(dat_pt_wide[,-1])
-  # Adjust format
-
-prot_corrected <- ComBat(
-  dat = prot_mat,
-  batch = batch,
-  par.prior = TRUE,
-  prior.plots = FALSE
-) # Batch correction
-
-prot_corrected <- t(prot_corrected)
-  # Return to original format
-
-dat_pt_T1 <- data.frame(sid = dat_pt_wide$sid, prot_corrected)
-  # Add sid back
-
-# write.csv(dat_mb_T1, here::here("DataProcessed", "micro_wide_Ezra.csv"))
-# write.csv(dat_pt_T1, here::here("DataProcessed", "soma_wide_Ezra.csv"))
-
-
+micro <- read.csv(here::here("DataProcessed", "micro_wide.csv"), header = T)
+soma <- read.csv(here::here("DataProcessed", "soma_wide.csv"), header = T)
 dat_clin <- read.csv(here::here("DataRaw", "CF_pex_clinical.txt"))
-dat_clin <- dat_clin %>%
-  filter(sid %in% dat_mb_T1$sid)
-```
+rownames(micro) <- micro$sid
+rownames(soma) <- soma$sid
+dat_mb_T1 <- micro[, !(names(micro) %in% c("X", "sid"))]
+dat_pt_T1 <- soma[, !(names(soma) %in% c("X", "sid"))]
 
+library(vegan)
+b <- vegdist(dat_mb_T1, method="horn")
+c <- vegdist(dat_pt_T1, method="horn")
+#c <- c / max(c)
+  # converts to 0/1 so the same scale as horn
+```
 
 Individual Clustering
 ```{r}
-rownames(dat_mb_T1) <- dat_mb_T1$sid
-rownames(dat_pt_T1) <- dat_pt_T1$sid
-dat_mb_T1 <- dat_mb_T1[, !(names(dat_mb_T1) %in% c("X", "sid"))]
-dat_pt_T1 <- dat_pt_T1[, !(names(dat_pt_T1) %in% c("X", "sid"))]
 
-mb_LapSft <- gaussLaplac(dat_mb_T1, lap.type = 'shift', 
-                         kernel = "Spectrum")
+gaussLaplac <- function(dat, kernel='input',
+                        lap.type = 'sym',
+                        grf.type = 'full', k=5, p=5,
+                        epsilon=0, mutual=FALSE, 
+                        binary.grf=FALSE,
+                        plots=TRUE, verbose=TRUE){
+  
+  # if(kernel == 'Gaussian' & is.null(rho)) rho <- median(dist(dat))
+  if(kernel == 'Gaussian') A <- Gaussian_kernel(dat, rho = rho)
+  if(kernel == 'input') A <- data.matrix(dat)
+  if(kernel == 'Zhang') A <- Zhang_kernel(dat, p)
+  if(kernel == 'Spectrum'){
+    dtd <- as.data.frame( t(dat) )
+    A <- Spectrum::CNN_kernel(dtd)
+  }
+  
+  if(kernel == 'Linear') A <- dat%*%t(dat)
+  if(kernel == 'Cor') A <- cor(t(dat))
+  
+  diag(A) <- 0 ## Adjacency matrices need diag of 0
+  
+  if(verbose){
+    message(paste('Distances calculated with', kernel, 'kernel.'))
+    message("Summary of parwise distances:")
+    print(summary(A[lower.tri(A)]))
+  }
+  
+  if(grf.type == 'e-graph'){
+    A[A < epsilon] <- 0
+  }
+  
+  if(grf.type == 'knn'){
+    A <- knnGrf(A, k, mutual=mutual)
+  }
+  
+  if(binary.grf) A[A >0] <- 1
+  
+  deg <- rowSums(A)
+  
+  if(lap.type == 'sym'){
+    ds <- ifelse(deg>0, 1/sqrt(deg), 0)
+    # L = I - D^(-1/2) A D^(-1/2)
+    L <- diag(nrow = nrow(A)) - diag(ds) %*% A %*% diag(ds)
+  }
+  
+  ## 'Shifted' Laplacian
+  if(lap.type == "shift"){
+    ds <- ifelse(deg>0, 1/sqrt(deg), 0)
+    # L = I + D^(-1/2) A D^(-1/2)
+    L <- diag(nrow = nrow(A)) + diag(ds) %*% A %*% diag(ds)
+  }
+  
+  ## Laplacian used by Ng (2002) 'On Spectral Clustering'
+  if(lap.type == "Ng"){
+    ds <- ifelse(deg>0, 1/sqrt(deg), 0)
+    # L = D^(-1/2) A D^(-1/2)
+    L <- diag(ds) %*% A %*% diag(ds)
+  }
+  
+  ## Random walk Laplacian (best one)
+  if(lap.type == 'rw'){
+    ds <- ifelse(deg>0, 1/deg, 0)
+    # L = I - D^-1 A
+    L <- diag(nrow = nrow(A)) - diag(ds) %*% A
+  } 
+  
+  if(plots){
+    gg <- igraph::graph_from_adjacency_matrix(A,
+                                              mode='undirected',
+                                              weighted = TRUE)
+    # plot(gg, layout=igraph::layout_with_kk,
+    #      vertex.color='darkorchid1',
+    #      vertex.label=NA)
+    
+    stats::heatmap(A, symm=TRUE, 
+                   main = "Heatmap of Adjacency Matrix")
+    
+    plot(eigen(L)$values, col='dodgerblue3', pch=20, type="b",
+         ylab="Eigen values", main = "Eigen values of the Laplacian")
+  }
+  
+  L
+}
+
+mb_LapSft <- gaussLaplac(b, lap.type = 'rw', 
+                         kernel = "input")
   #Microbiome Eigenvalues of graph Laplacian and Heatmap of Adjacency Matrix for T1 
-prot_LapSft <- gaussLaplac(dat_pt_T1, lap.type = 'shift',
-                        kernel = "Spectrum")
+prot_LapSft <- gaussLaplac(c, lap.type = 'rw',
+                        kernel = "input")
   #Proteomics Eigenvalues of graph Laplacian and Heatmap of Adjacency Matrix for T1 
 ```
 
@@ -146,19 +144,18 @@ mb_vecs <- mb_eigSft$vectors
 
 mb_for_nb <- mb_vecs[, 1:5]   
   # first 5 eigenvectors
-NbClust(mb_for_nb, distance = "euclidean", method = "kmeans", index = "alllong")
-  # TrCovW gives 4, TraceW gives 3
-mk <- 4
+NbClust(mb_for_nb, diss = b, distance = NULL, method = "kmeans", index = "alllong")
+  # TrCovW  gives 3
+mk <- 3
 mbInd <- 1:mk
 mbv <- mb_vecs[,mbInd]
 mbGMM <- GMM(mbv, mk, dist_mode = 'eucl_dist', em_iter = 15)
 mbClust <- predict(mbGMM, newdata = mbv)
-  # 4 4 4 4 2 4 4 4 4 2 2 4 3 1 1 3 1 1 1 3 1 1 2 3 3 1 3 1 2 3 3
 
 prot_vecs <- prot_eigSft$vectors
 prot_for_nb <- prot_vecs[, 1:5]
-NbClust(prot_for_nb, distance = "euclidean", method = "kmeans", index = "alllong")
-  # TraceW gives 6, TrCovW gives 3
+NbClust(prot_for_nb, diss = c, distance = NULL, method = "kmeans", index = "alllong")
+  # TrCovW gives 3
 pk <- 3
 protInd <- 1:pk
 pev <- prot_eigSft$vectors[,protInd] 
@@ -174,8 +171,8 @@ flm <- flmSym <- flagMean(list(Up, Um), plots = FALSE)
 flm.vecs <- flm$u
 
 NbClust(flm.vecs, method = 'kmeans', index='alllong')
-  # TrCovW gives 3
-Fk <- 3
+  # TrCovW gives 4
+Fk <- 4
 set.seed(235)
 flgClust <- kmeans(flm.vecs[,1:4], centers = Fk, nstart = 10)$cluster
 
@@ -219,6 +216,50 @@ ggplot(
   labs(
     y = "Number of Individuals",
     title = "Individual Cluster Comparison"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+dat_cluster <- data.frame(sid = rownames(dat_mb_T1), 
+                          joint_OG = joint_OG, joint_HE = joint_HE, joint_hell = joint_hell,
+                          stringsAsFactors = FALSE)
+
+dat_cluster <- dat_cluster %>%
+  mutate(
+    joint_OG   = factor(joint_OG,   levels = sort(unique(joint_OG))),
+    joint_HE   = factor(joint_HE,   levels = sort(unique(joint_HE))),
+    joint_hell = factor(joint_hell, levels = sort(unique(joint_hell)))
+  )
+
+freqDF <- as.data.frame(
+  xtabs(~ joint_OG + joint_HE + joint_hell,
+        data = dat_cluster)
+  ) %>%
+  rename(
+    `Original Joint Clusters` = joint_OG,
+    `Horn/Euclidean Joint Clusters` = joint_HE,
+    `Hellinger Joint Clusters` = joint_hell
+  )
+
+ggplot(
+  freqDF,
+  aes(
+    axis1 = `Horn/Euclidean Joint Clusters`,
+    axis2 = `Hellinger Joint Clusters`,
+    y = Freq
+  )
+) +
+  geom_alluvium(aes(fill = `Original Joint Clusters`), alpha = 0.8) +
+  geom_stratum() +
+  geom_text(stat = "stratum", aes(label = after_stat(stratum))) +
+  scale_x_discrete(
+    limits = c("Horn/Euclidean Joint Clusters", "Hellinger Joint Clusters"),
+    expand = c(.1, .1)
+  ) +
+  labs(
+    y = "Number of Individuals",
+    title = "Distance Matrix Cluster Comparison"
   ) +
   theme_minimal()
 ```
@@ -700,11 +741,11 @@ table1::table1(
 
 table1::table1(
   ~ Gender + `Age (years; TP1)` + `Number of F508del Alleles` +
-    `Height (cm; TP1)` + #`Weight (kg; TP1)` + 
+    `Height (cm; TP1)` + `Weight (kg; TP1)` + 
     `Pulmonary Exacerbations (Past Year; TP1)` + `Hospitalizations (Past Year; TP1)` +
-    `FEV1 % Predicted (TP1)` + #`FEV1 % Predicted (TP2)` + `FEV1 % Predicted (TP3)` +
-    `FVC % Predicted (TP1)` + #`FVC % Predicted (TP2)` + `FVC % Predicted (TP3)` +
-    `PES Total (TP1)`,# + `PES Total (TP2)` + `PES Total (TP3)`,
+    `FEV1 % Predicted (TP1)` + `FEV1 % Predicted (TP2)` + `FEV1 % Predicted (TP3)` +
+    `FVC % Predicted (TP1)` + `FVC % Predicted (TP2)` + `FVC % Predicted (TP3)` +
+    `PES Total (TP1)` + `PES Total (TP2)` + `PES Total (TP3)`,
   data = dat_table1
 )
 
@@ -723,11 +764,12 @@ table1(
     `Pulmonary Exacerbations (Past Year; TP1)` + `Hospitalizations (Past Year; TP1)` +
     `FEV1 % Predicted (TP1)` + #`FEV1 % Predicted (TP2)` + `FEV1 % Predicted (TP3)` +
     `FVC % Predicted (TP1)` + #`FVC % Predicted (TP2)` + `FVC % Predicted (TP3)` +
-    `PES Total (TP1)`,# | joint, #+ `PES Total (TP2)` + `PES Total (TP3)`,
+    `PES Total (TP1)` | joint, #+ `PES Total (TP2)` + `PES Total (TP3)`,
   data = dat_table1,
   render.continuous = my.render.cont,
   caption = "<b>Categorical variables:</b> N (%) </br><b>Continuous variables:</b> Mean (SD)"
 )
+
 ```
 
 ```{r}
